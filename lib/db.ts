@@ -142,7 +142,9 @@ export async function upsertSession(
     INSERT INTO sessions (event_id, session_id, session_label, session_date, total_capacity)
     VALUES (${eventId}, ${sessionId}, ${label}, ${date}, ${capacity})
     ON CONFLICT (event_id, session_id)
-    DO UPDATE SET session_label = EXCLUDED.session_label, total_capacity = EXCLUDED.total_capacity
+    DO UPDATE SET session_label    = EXCLUDED.session_label,
+                  session_date     = EXCLUDED.session_date,
+                  total_capacity   = EXCLUDED.total_capacity
     RETURNING id
   `;
   return rows[0].id as number;
