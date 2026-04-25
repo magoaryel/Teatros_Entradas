@@ -7,6 +7,8 @@ export interface Event {
   url: string;
   platform: string;
   active: boolean;
+  page_url: string | null;
+  has_tickets: boolean;
   created_at: string;
 }
 
@@ -47,9 +49,13 @@ export async function initDb() {
       url TEXT NOT NULL,
       platform TEXT DEFAULT 'gruposmedia',
       active BOOLEAN DEFAULT true,
+      page_url TEXT,
+      has_tickets BOOLEAN DEFAULT false,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `;
+  await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS page_url TEXT`;
+  await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS has_tickets BOOLEAN DEFAULT false`;
   await db`
     CREATE TABLE IF NOT EXISTS sessions (
       id SERIAL PRIMARY KEY,
