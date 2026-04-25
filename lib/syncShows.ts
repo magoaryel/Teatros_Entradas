@@ -49,9 +49,9 @@ async function parseEventPage(pageUrl: string): Promise<DiscoveredShow | null> {
     const ticketRaw = links.find(l => TICKET_DOMAINS.some(d => l.includes(d)));
     const ticketUrl = ticketRaw ? cleanTicketUrl(ticketRaw) : null;
 
-    // Venue — look for "Teatro X", "Auditorio X", etc.
-    const venueM = html.match(/(?:Teatro|Auditorio|Sala|Palacio|Centro Cultural|Teatro-Cine)\s+[\w\sáéíóúñÁÉÍÓÚÑ\-]+/i);
-    const venue = venueM?.[0]?.replace(/\s+/g, " ").trim() ?? "";
+    // Venue — look inside elements with venue/location class/attribute (avoids nav pollution)
+    const venueTagM = html.match(/<[^>]*(?:class|itemprop)="[^"]*(?:venue|location)[^"]*"[^>]*>([^<]{3,80})</i);
+    const venue = venueTagM?.[1]?.replace(/\s+/g, " ").trim() ?? "";
 
     // City — from event slug or title
     const cityM = name.match(/(?:en|EN)\s+([A-ZÁÉÍÓÚÑ][A-Za-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñ]+)?)/);
