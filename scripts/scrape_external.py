@@ -165,8 +165,10 @@ def scrape_auditoriocartuja(page, url):
                 jr = requests.get(endpoint, headers=janto_headers, timeout=15)
                 jr.raise_for_status()
                 candidate = jr.json()
-                # Validate it contains session data (not an error object)
-                if isinstance(candidate, list) or (isinstance(candidate, dict) and "sessionDate" in candidate):
+                print(f"  {event_code} {endpoint.split('sessions/')[1]} → 200, keys={list(candidate.keys()) if isinstance(candidate, dict) else f'list[{len(candidate)}]'}")
+                # Accept any non-error JSON dict or non-empty list
+                is_error = isinstance(candidate, dict) and candidate.get("error") and not candidate.get("sessionDate")
+                if not is_error:
                     data = candidate
                     used_code = event_code
                     print(f"  Using code {event_code} → {endpoint.split('sessions/')[1]}")
@@ -310,7 +312,7 @@ def scrape_reservaentradas(page, url):
             // SVG className is SVGAnimatedString — must use getAttribute
             const cls   = (el.getAttribute('class') || '').toLowerCase();
             // Red-ish: high R, low G  e.g. rgb(200,30,30)
-            const rgbM  = bg.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+            const rgbM  = bg.match(/rgb[(](\\d+),\\s*(\\d+),\\s*(\\d+)[)]/u);
             const isRed = rgbM ? (parseInt(rgbM[1]) > 150 && parseInt(rgbM[2]) < 80) : false;
             if (isRed || fill === 'red' || fill === '#e53935' || fill === '#c62828' ||
                 cls.includes('ocupad') || cls.includes('vendid')) {
