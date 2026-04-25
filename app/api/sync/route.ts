@@ -9,14 +9,17 @@ async function upsertShow(
   ticketUrl: string | null, isoDate: string
 ) {
   const db = neon(process.env.DATABASE_URL!);
+  const platform = ticketUrl ? detectPlatform(ticketUrl) : "manual";
 
   // Deduplicate by ticket URL first
   if (ticketUrl) {
     const byTicket = await db`SELECT id FROM events WHERE url = ${ticketUrl} LIMIT 1`;
     if (byTicket.length > 0) {
       await db`
-        UPDATE events SET page_url = ${pageUrl}, venue = ${venue}, has_tickets = true,
-        show_date = COALESCE(show_date, ${isoDate || null})
+        UPDATE events SET
+          page_url = ${pageUrl}, venue = ${venue},
+          has_tickets = true, platform = ${platform},
+          show_date = COALESCE(show_date, ${isoDate || null})
         WHERE id = ${byTicket[0].id}
       `;
       return byTicket[0].id as number;
@@ -28,16 +31,16 @@ async function upsertShow(
   if (byPage.length > 0) {
     await db`
       UPDATE events SET
-        url = COALESCE(NULLIF(${ticketUrl ?? ""}, ""), url),
-        has_tickets = CASE WHEN ${!!ticketUrl} THEN true ELSE has_tickets END,
+        venue = ${venue},
+        platform = ${platform},
+        has_tickets = ${!!ticketUrl},
         show_date = COALESCE(show_date, ${isoDate || null}),
-        venue = ${venue}
+        url = ${ticketUrl ?? pageUrl}
       WHERE id = ${byPage[0].id}
     `;
     return byPage[0].id as number;
   }
 
-  const platform = ticketUrl ? detectPlatform(ticketUrl) : "manual";
   const rows = await db`
     INSERT INTO events (name, venue, url, platform, page_url, has_tickets, show_date)
     VALUES (
@@ -62,7 +65,7 @@ export async function POST() {
         show.name, show.venue || show.city,
         show.pageUrl, show.ticketUrl, show.isoDate
       );
-      results.push({ id, name: show.name, hasTickets: !!show.ticketUrl });
+      results.push({ id, name: show.name, hasTickets: !!show.ticketUrl, platform: show.ticketUrl ? detectPlatform(show.ticketUrl) : "manual" });
     } catch (e) {
       results.push({ name: show.name, error: String(e) });
     }
