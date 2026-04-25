@@ -223,8 +223,8 @@ def scrape_auditoriocartuja(page, url):
         # Date is in desc3 field as "20261029214500" (YYYYMMDDHHMMSS)
         raw = str(s.get("desc3") or s.get("sessionDate") or "")
         if len(raw) >= 12:
-            label    = f"{raw[6:8]}/{raw[4:6]}/{raw[:4]} {raw[8:10]}:{raw[10:12]}"
             date_iso = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+            label    = f"{date_iso}T{raw[8:10]}:{raw[10:12]}"  # ISO for frontend formatDate()
         else:
             label    = s.get("InfoEvSes1", "") or raw
             date_iso = ""

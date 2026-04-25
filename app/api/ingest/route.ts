@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getActiveEvents, upsertSession, saveSnapshot, getLatestSnapshot } from "@/lib/db";
+import { getActiveEvents, upsertSession, saveSnapshot, getLatestSnapshot, deleteStaleSessionsForEvent } from "@/lib/db";
 import { notifySales, notifySoldOut } from "@/lib/telegram";
 
 // GitHub Actions posts scraped data here
@@ -28,6 +28,9 @@ export async function POST(req: NextRequest) {
 
   const saved = [];
   for (const r of results) {
+    // Remove sessions no longer reported (e.g. stale "main" placeholder)
+    await deleteStaleSessionsForEvent(r.eventId, r.sessions.map(s => s.session_id));
+
     for (const s of r.sessions) {
       const sessionDbId = await upsertSession(r.eventId, s.session_id, s.label, s.date, s.capacity);
       const prev = await getLatestSnapshot(sessionDbId);

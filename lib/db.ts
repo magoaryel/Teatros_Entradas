@@ -122,6 +122,17 @@ export async function deleteEvent(id: number) {
   await db`DELETE FROM events WHERE id = ${id}`;
 }
 
+export async function deleteStaleSessionsForEvent(eventId: number, keepSessionIds: string[]) {
+  const db = sql();
+  if (keepSessionIds.length === 0) return;
+  const existing = await db`SELECT id, session_id FROM sessions WHERE event_id = ${eventId}` as { id: number; session_id: string }[];
+  for (const row of existing) {
+    if (!keepSessionIds.includes(row.session_id)) {
+      await db`DELETE FROM sessions WHERE id = ${row.id}`;
+    }
+  }
+}
+
 export async function upsertSession(
   eventId: number, sessionId: string, label: string,
   date: string, capacity: number
