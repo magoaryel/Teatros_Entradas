@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p C:/Users/juego/.claude/plugins/marketplaces/thedotmack/plugin)",
+      "Bash(cp -r 'C:/Users/juego/AppData/Local/npm-cache/_npx/2fdb3b6849710270/node_modules/claude-mem/plugin/*' C:/Users/juego/.claude/plugins/marketplaces/thedotmack/plugin/)"
+    ]
+  }
+}
