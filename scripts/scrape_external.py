@@ -328,17 +328,21 @@ def scrape_reservaentradas(_, url):
         print(f"  sesionv2 error: {e}")
         return []
 
-    aforo      = data.get("Aforo", 0)
-    disponible = data.get("Disponibles", 0)
+    # Aforo and Disponibles live inside the Sesion sub-object
+    sesion     = data.get("Sesion") or {}
+    aforo      = sesion.get("Aforo", 0)
+    disponible = sesion.get("Disponibles", 0)
     sold       = max(0, aforo - disponible)
     print(f"  sesionv2: aforo={aforo}, disponibles={disponible}, sold={sold}")
 
     if aforo == 0:
+        # Log top-level keys for debugging unexpected structure
+        print(f"  sesionv2 top keys: {list(data.keys())[:10]}")
+        print(f"  Sesion keys: {list(sesion.keys())[:10]}")
         print("  No seat data in sesionv2")
         return []
 
     # Date from Sesion.FechaSesion ("30/05/2026") + Sesion.Horatxt ("20:00")
-    sesion   = data.get("Sesion") or {}
     fecha    = sesion.get("FechaSesion") or sesion.get("Fecha") or ""
     hora     = (sesion.get("Horatxt") or sesion.get("Hora") or "").strip()
     dm = re.match(r'(\d{1,2})/(\d{2})/(\d{4})', fecha)
