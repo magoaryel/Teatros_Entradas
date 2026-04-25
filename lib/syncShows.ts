@@ -30,8 +30,15 @@ function extractLinks(html: string): string[] {
 }
 
 function cleanTicketUrl(url: string): string {
-  // Remove UTM/tracking params after &#038; or &
-  return url.replace(/&#038;.*$/, "").replace(/&_gl=.*$/, "").replace(/&utm.*$/i, "");
+  // Decode HTML entity &#038; → & first
+  let clean = url.replace(/&#038;/g, "&");
+  // Remove known tracking params only (not functional params like &codigo=)
+  clean = clean.replace(/[&?]_gl=[^&]*/g, "");
+  clean = clean.replace(/[&?]_gcl_[^=]+=[^&]*/g, "");
+  clean = clean.replace(/[&?]utm_[^=]+=[^&]*/g, "");
+  // Clean trailing ? or &
+  clean = clean.replace(/[?&]$/, "");
+  return clean;
 }
 
 async function parseEventPage(pageUrl: string): Promise<DiscoveredShow | null> {

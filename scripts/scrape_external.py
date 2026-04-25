@@ -1,8 +1,8 @@
 """
 GitHub Actions scraper — Playwright scraper for JS-heavy ticket platforms.
-Sends results to /api/ingest. Saves HTML snapshots as artifacts for debugging.
+Sends results to /api/ingest.
 """
-import os, json, re, sys, requests, pathlib
+import os, json, re, sys, requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 INGEST_URL    = os.environ.get("INGEST_URL", "")
@@ -12,8 +12,6 @@ if not INGEST_URL or not INGEST_SECRET:
     print("ERROR: INGEST_URL or INGEST_SECRET not set"); sys.exit(1)
 
 HEADERS = {"x-ingest-secret": INGEST_SECRET, "Content-Type": "application/json"}
-DEBUG_DIR = pathlib.Path("debug_html")
-DEBUG_DIR.mkdir(exist_ok=True)
 
 
 def get_active_events():
@@ -23,152 +21,187 @@ def get_active_events():
         print("ERROR 401: check INGEST_SECRET in Vercel env vars"); sys.exit(1)
     r.raise_for_status()
     events = r.json()
-    print(f"Found {len(events)} active events")
-    for e in events:
-        print(f"  [{e.get('platform')}] {e.get('name')}")
+    targets = [e for e in events if e.get("platform") in SCRAPERS]
+    print(f"Found {len(events)} events, {len(targets)} to scrape")
+    for e in targets:
+        print(f"  [{e.get('platform')}] {e.get('name')} — {e.get('url', '')[:80]}")
     return events
 
 
-def save_debug(name: str, html: str):
-    path = DEBUG_DIR / f"{name}.html"
-    path.write_text(html, encoding="utf-8", errors="replace")
-    print(f"  Saved debug HTML: {path} ({len(html)} chars)")
-
-
-def count_elements(page, *selectors) -> int:
-    return sum(len(page.query_selector_all(s)) for s in selectors)
-
-
 # ── todaslasentradas.com ─────────────────────────────────────────────────────
+# Seat classes confirmed from HTML: .mapaLibre and .mapaOcupada
 
-def scrape_todaslasentradas(page, url, name):
+def scrape_todaslasentradas(page, url):
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(4000)
-    html = page.content()
-    save_debug(name, html)
-    print(f"  Title: {page.title()}")
+    page.wait_for_timeout(2000)
 
-    # Try Palco4 arraySesiones (same platform family)
+    # Try Palco4 arraySesiones first
     raw = page.evaluate("typeof arraySesiones !== 'undefined' ? JSON.stringify(arraySesiones) : null")
     if raw:
         sessions = json.loads(raw)
-        print(f"  Found arraySesiones with {len(sessions)} sessions")
-        return [{"session_id": str(s.get("idSesion","main")),
-                 "label": s.get("litSesion") or s.get("fechaCelebracionStr",""),
-                 "date": (s.get("fecha") or s.get("fechaCelebracionStr",""))[:10],
-                 "capacity": s.get("aforo",0), "sold": s.get("entradasVendidas",0),
-                 "reserved": s.get("entradasReservadas",0)}
+        return [{"session_id": str(s.get("idSesion", "main")),
+                 "label": s.get("litSesion") or s.get("fechaCelebracionStr", ""),
+                 "date": (s.get("fecha") or s.get("fechaCelebracionStr", ""))[:10],
+                 "capacity": s.get("aforo", 0), "sold": s.get("entradasVendidas", 0),
+                 "reserved": s.get("entradasReservadas", 0)}
                 for s in sessions if not s.get("streamingOnly")]
 
-    # Count every element whose class contains seat-related words
-    seats = {
-        "ButacaLibre":     count_elements(page, ".ButacaLibre"),
-        "ButacaOcupada":   count_elements(page, ".ButacaOcupada", ".ButacaNoDisponible", ".ButacaVendida"),
-        "[libre]":         count_elements(page, "[class*='libre']"),
-        "[ocupad]":        count_elements(page, "[class*='ocupad']", "[class*='vendid']"),
-        "svg rect":        count_elements(page, "svg rect"),
-        "svg circle":      count_elements(page, "svg circle"),
-    }
-    print(f"  Seat element counts: {seats}")
+    # Use confirmed CSS classes from HTML analysis
+    libre   = len(page.query_selector_all("[class*='mapaLibre']"))
+    ocupada = len(page.query_selector_all("[class*='mapaOcupada']"))
+    total   = libre + ocupada
+    print(f"  mapaLibre={libre}, mapaOcupada={ocupada}, total={total}")
 
-    # Look for available count in text
-    text = page.inner_text("body")
-    print(f"  Body text (first 300): {text[:300].replace(chr(10),' ')}")
-    nums = re.findall(r"(\d+)\s*(?:disponibles?|libres?|available)", text, re.IGNORECASE)
-    print(f"  'disponibles' numbers: {nums}")
+    if total == 0:
+        print("  No seat data found")
+        return []
 
-    libre = seats["ButacaLibre"] or seats["[libre]"]
-    ocup  = seats["ButacaOcupada"] or seats["[ocupad]"]
-    if libre + ocup > 5:
-        return [{"session_id":"main","label":page.title(),"date":"",
-                 "capacity": libre+ocup, "sold": ocup, "reserved": 0}]
-    print("  No seat data found")
-    return []
+    title = page.title()
+    # Extract date from page body
+    body  = page.inner_text("body")
+    date_m = re.search(r'\d{1,2}\s+\w+\s+\d{4}', body)
+    label = date_m.group(0) if date_m else title
+
+    return [{"session_id": "main", "label": label, "date": "",
+             "capacity": total, "sold": ocupada, "reserved": 0}]
 
 
 # ── bacantix.com ─────────────────────────────────────────────────────────────
+# NOTE: URL must include &codigo= parameter (fixed in syncShows.ts)
 
-def scrape_bacantix(page, url, name):
+def scrape_bacantix(page, url):
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
     page.wait_for_timeout(5000)
-    html = page.content()
-    save_debug(name, html)
-    print(f"  Title: {page.title()}")
 
-    seats = {
-        "Libre(class)":  count_elements(page, "[class*='Libre']", "[class*='libre']"),
-        "Ocupado(class)":count_elements(page, "[class*='Ocupado']","[class*='Vendido']","[class*='ocupado']"),
-        "Libre(title)":  count_elements(page, "[title='Libre']", "[title*='libre']"),
-        "Ocupado(title)":count_elements(page, "[title='Ocupado']","[title*='Vendido']"),
-        "svg rect":      count_elements(page, "svg rect"),
-        "svg circle":    count_elements(page, "svg circle"),
-        "svg path":      count_elements(page, "svg path"),
-        "div[onclick]":  count_elements(page, "div[onclick]"),
-        "td[onclick]":   count_elements(page, "td[onclick]"),
-    }
-    print(f"  Seat element counts: {seats}")
-    text = page.inner_text("body")
-    print(f"  Body text (first 300): {text[:300].replace(chr(10),' ')}")
+    title = page.title()
+    print(f"  Title: {title}")
 
-    libre = seats["Libre(class)"] or seats["Libre(title)"]
-    ocup  = seats["Ocupado(class)"] or seats["Ocupado(title)"]
-    if libre + ocup > 5:
-        return [{"session_id":"main","label":page.title(),"date":"",
-                 "capacity": libre+ocup, "sold": ocup, "reserved": 0}]
+    # Check if page loaded correctly
+    body = page.inner_text("body")
+    if "no está disponible" in body or "Oops" in body:
+        print(f"  Page not available — URL might be wrong")
+        print(f"  Body: {body[:200]}")
+        return []
 
-    # Try SVG elements
-    if seats["svg rect"] > 10:
-        total = seats["svg rect"]
-        print(f"  Using SVG rects as proxy: {total} total")
-        return [{"session_id":"main","label":page.title(),"date":"",
-                 "capacity": total, "sold": 0, "reserved": 0}]
+    # Try multiple seat selectors (bacantix uses various class conventions)
+    selectors_libre  = ["[class*='Libre']", "[class*='libre']", "[title='Libre']",
+                        ".asiento-libre", ".localidad-libre"]
+    selectors_ocup   = ["[class*='Ocupado']", "[class*='Vendido']", "[class*='ocupado']",
+                        "[title='Ocupado']", ".asiento-ocupado", ".localidad-ocupado"]
+
+    libre  = sum(len(page.query_selector_all(s)) for s in selectors_libre)
+    ocupado = sum(len(page.query_selector_all(s)) for s in selectors_ocup)
+    print(f"  libre={libre}, ocupado={ocupado}")
+
+    # Try SVG approach — count by computed fill color
+    if libre + ocupado == 0:
+        result = page.evaluate("""() => {
+            const seats = document.querySelectorAll('svg rect, svg circle, svg polygon');
+            const colors = {};
+            seats.forEach(el => {
+                const fill = window.getComputedStyle(el).fill;
+                colors[fill] = (colors[fill] || 0) + 1;
+            });
+            return colors;
+        }""")
+        print(f"  SVG computed colors: {result}")
+        if result:
+            # Most common colors: try to identify libre vs ocupado
+            sorted_colors = sorted(result.items(), key=lambda x: -x[1])
+            print(f"  Top colors: {sorted_colors[:5]}")
+
+    if libre + ocupado > 5:
+        return [{"session_id": "main", "label": title, "date": "",
+                 "capacity": libre + ocupado, "sold": ocupado, "reserved": 0}]
 
     print("  No seat data found")
     return []
 
 
 # ── reservaentradas.com ──────────────────────────────────────────────────────
+# 617 butaca1 elements — state set via Angular (computed styles)
 
-def scrape_reservaentradas(page, url, name):
+def scrape_reservaentradas(page, url):
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(3000)
-    html = page.content()
-    save_debug(name, html)
-    print(f"  Title: {page.title()}")
-    text = page.inner_text("body")
-    print(f"  Body text (first 500): {text[:500].replace(chr(10),' ')}")
+    page.wait_for_timeout(5000)  # Extra wait for Angular
 
-    # Patterns for available/sold
-    for pattern, label in [
-        (r"(\d+)\s+disponibles?", "disponibles"),
-        (r"(\d+)\s+libres?",      "libres"),
-        (r"(\d+)\s+entradas?\s+disponibles?", "entradas disponibles"),
-        (r"quedan\s+(\d+)",       "quedan"),
-    ]:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            avail = int(m.group(1))
-            tm = re.search(r"(\d+)\s+(?:total|aforo|plazas)", text, re.IGNORECASE)
-            total = int(tm.group(1)) if tm else 0
-            print(f"  Found '{label}': avail={avail}, total={total}")
-            return [{"session_id":"main","label":page.title(),"date":"",
-                     "capacity":total,"sold":max(0,total-avail),"reserved":0}]
+    title = page.title()
 
-    seats = {
-        "libre":  count_elements(page, ".libre,.available,[class*='libre'],[class*='available']"),
-        "ocupado":count_elements(page, ".ocupado,.sold,[class*='ocupado'],[class*='sold']"),
-        "svg":    count_elements(page, "svg rect", "svg circle"),
-    }
-    print(f"  Seat counts: {seats}")
-    if seats["libre"] + seats["ocupado"] > 5:
-        return [{"session_id":"main","label":page.title(),"date":"",
-                 "capacity":seats["libre"]+seats["ocupado"],
-                 "sold":seats["ocupado"],"reserved":0}]
-    print("  No seat data found")
-    return []
+    # Use page.evaluate to check computed fill colors of seat paths
+    # Each seat (butaca1) contains SVG paths — their color indicates state
+    result = page.evaluate("""() => {
+        const seats = document.querySelectorAll('.butaca1, .cursorPointer.butaca1');
+        let libre = 0, ocupado = 0, unknown = 0;
+        seats.forEach(seat => {
+            const paths = seat.querySelectorAll('path, rect, circle');
+            if (paths.length === 0) { unknown++; return; }
+            // Get computed fill of first significant path
+            const fill = window.getComputedStyle(paths[0]).fill;
+            // Typically: grey/dark = occupied, light/green/blue = available
+            // We'll collect the fills and analyze
+            if (fill) {
+                const rgb = fill.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)\\)/);
+                if (rgb) {
+                    const [r, g, b] = [parseInt(rgb[1]), parseInt(rgb[2]), parseInt(rgb[3])];
+                    const brightness = (r + g + b) / 3;
+                    // Dark grey (158,158,158) likely = occupied or default
+                    // White or light = available
+                    if (brightness > 200) libre++;
+                    else if (brightness < 100) ocupado++;
+                    else unknown++;
+                }
+            }
+        });
+        return { total: seats.length, libre, ocupado, unknown };
+    }""")
+
+    print(f"  Angular seat analysis: {result}")
+
+    # Also try getting all unique fill colors to understand the mapping
+    colors = page.evaluate("""() => {
+        const seats = document.querySelectorAll('.butaca1 path');
+        const colorMap = {};
+        seats.forEach(el => {
+            const fill = window.getComputedStyle(el).fill;
+            colorMap[fill] = (colorMap[fill] || 0) + 1;
+        });
+        return colorMap;
+    }""")
+    print(f"  Fill colors of butaca1 paths: {colors}")
+
+    total = result.get("total", 0) if result else 0
+    if total == 0:
+        # Fallback: text-based
+        body = page.inner_text("body")
+        for pattern in [r"(\d+)\s+disponibles?", r"(\d+)\s+libres?"]:
+            m = re.search(pattern, body, re.IGNORECASE)
+            if m:
+                avail = int(m.group(1))
+                print(f"  Text fallback: {avail} disponibles")
+                return [{"session_id": "main", "label": title, "date": "",
+                         "capacity": 0, "sold": 0, "reserved": 0}]
+        print("  No seat data found")
+        return []
+
+    # If we got color data, use it
+    if colors:
+        sorted_c = sorted(colors.items(), key=lambda x: -x[1])
+        print(f"  Top fill colors: {sorted_c[:4]}")
+        # If two dominant colors, one is libre and one is ocupado
+        # We need to determine which is which — for now report total
+        # and mark unknown as available (conservative)
+        ocupado = result.get("ocupado", 0)
+        libre   = result.get("libre", 0) + result.get("unknown", 0)
+        if libre + ocupado == 0:
+            libre = total  # All seats, we don't know state yet
+
+    return [{"session_id": "main", "label": title, "date": "",
+             "capacity": total,
+             "sold": result.get("ocupado", 0),
+             "reserved": 0}]
 
 
 SCRAPERS = {
@@ -183,7 +216,6 @@ SCRAPERS = {
 def main():
     events  = get_active_events()
     targets = [e for e in events if e.get("platform") in SCRAPERS]
-    print(f"\nTargets: {len(targets)}")
 
     results = []
     with sync_playwright() as p:
@@ -197,11 +229,10 @@ def main():
         for event in targets:
             platform = event["platform"]
             url      = event["url"]
-            slug     = re.sub(r"[^a-z0-9]", "_", event["name"].lower())[:30]
             print(f"\n[{platform}] {event['name']}")
             print(f"  URL: {url}")
             try:
-                sessions = SCRAPERS[platform](page, url, slug)
+                sessions = SCRAPERS[platform](page, url)
                 if sessions:
                     results.append({"eventId": event["id"], "eventName": event["name"],
                                     "eventVenue": event["venue"], "sessions": sessions})
