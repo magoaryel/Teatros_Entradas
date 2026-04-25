@@ -45,7 +45,9 @@ export default async function Dashboard() {
     );
   }
 
-  const withTickets = events.filter(e => e.has_tickets);
+  const BROWSER_PLATFORMS = ["todaslasentradas", "bacantix", "reservaentradas", "auditoriocartuja", "manual"];
+  const withTickets = events.filter(e => e.has_tickets && !BROWSER_PLATFORMS.includes(e.platform));
+  const browserPlatform = events.filter(e => e.has_tickets && BROWSER_PLATFORMS.includes(e.platform));
   const withoutTickets = events.filter(e => !e.has_tickets);
 
   const eventData: (Event & { sessions: Session[] })[] = await Promise.all(
@@ -202,6 +204,41 @@ export default async function Dashboard() {
               </div>
             );
           })}
+        </>
+      )}
+
+      {/* Shows with tickets on platforms that need a browser */}
+      {browserPlatform.length > 0 && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "28px 0 16px" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)" }}>
+              Entradas online — ver manualmente
+            </div>
+            <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+          </div>
+          <div style={{ background: "#1e1a0e", border: "1px solid #3a3010", borderRadius: 8, padding: "12px 16px", marginBottom: 14, fontSize: 12, color: "#c9a84c" }}>
+            ⚠ Estas plataformas requieren JavaScript para mostrar datos — consulta la venta entrando al link directamente.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+            {browserPlatform.map(event => (
+              <div key={event.id} className="card" style={{ padding: 16, borderColor: "#3a3010" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>
+                  {event.name}
+                </div>
+                {event.venue && (
+                  <div style={{ fontSize: 12, color: "var(--gold)", marginBottom: 10 }}>📍 {event.venue}</div>
+                )}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+                  <span className="badge badge-yellow">{event.platform}</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <a href={event.url} target="_blank" className="btn btn-ghost btn-sm">Ver entradas →</a>
+                    {event.page_url && <a href={event.page_url} target="_blank" className="btn btn-ghost btn-sm">aryel.com</a>}
+                    <DeleteButton eventId={event.id} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </>
       )}
 

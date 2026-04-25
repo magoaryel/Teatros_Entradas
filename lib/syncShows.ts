@@ -1,4 +1,9 @@
-const TICKET_DOMAINS = ["gruposmedia.com", "entradas.plus", "atrapalo.com", "ticketmaster.es", "eventbrite.es", "wegow.com", "fever.com"];
+const TICKET_DOMAINS = [
+  "gruposmedia.com", "entradas.plus",
+  "todaslasentradas.com", "bacantix.com", "reservaentradas.com",
+  "auditoriocartuja.com",
+  "atrapalo.com", "ticketmaster.es", "eventbrite.es", "wegow.com", "fever.com",
+];
 
 export interface DiscoveredShow {
   slug: string;

@@ -39,10 +39,19 @@ async function scrapeGruposmedia(url: string): Promise<ScrapedSession[]> {
 }
 
 export function detectPlatform(url: string): string {
-  if (url.includes("gruposmedia.com") || url.includes("entradas.plus")) {
-    return "gruposmedia";
-  }
-  return "unknown";
+  if (url.includes("gruposmedia.com") || url.includes("entradas.plus")) return "gruposmedia";
+  if (url.includes("todaslasentradas.com")) return "todaslasentradas";
+  if (url.includes("bacantix.com")) return "bacantix";
+  if (url.includes("reservaentradas.com")) return "reservaentradas";
+  if (url.includes("auditoriocartuja.com")) return "auditoriocartuja";
+  return "manual";
+}
+
+// Platforms that require a real browser (JS execution) — not supported on Vercel serverless
+const BROWSER_REQUIRED = ["todaslasentradas", "bacantix", "reservaentradas", "auditoriocartuja", "manual"];
+
+export function requiresBrowser(platform: string): boolean {
+  return BROWSER_REQUIRED.includes(platform);
 }
 
 export async function scrapeEvent(
@@ -50,5 +59,8 @@ export async function scrapeEvent(
   platform: string
 ): Promise<ScrapedSession[]> {
   if (platform === "gruposmedia") return scrapeGruposmedia(url);
+  if (BROWSER_REQUIRED.includes(platform)) {
+    throw new Error(`BROWSER_REQUIRED:${platform}`);
+  }
   throw new Error(`Platform not supported: ${platform}`);
 }
