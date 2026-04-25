@@ -2,40 +2,50 @@
 GitHub Actions scraper — runs Playwright to scrape JS-heavy ticket platforms.
 Sends results to the Vercel /api/ingest endpoint.
 """
-import os, json, re, requests
+import os, json, re, sys, requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-INGEST_URL    = os.environ["INGEST_URL"]    # e.g. https://tu-app.vercel.app/api/ingest
-INGEST_SECRET = os.environ["INGEST_SECRET"] # same as Vercel env var
+INGEST_URL    = os.environ.get("INGEST_URL", "")
+INGEST_SECRET = os.environ.get("INGEST_SECRET", "")
 
-HEADERS = {"x-ingest-secret": INGEST_SECRET}
+if not INGEST_URL or not INGEST_SECRET:
+    print("ERROR: INGEST_URL or INGEST_SECRET not set")
+    sys.exit(1)
+
+HEADERS = {"x-ingest-secret": INGEST_SECRET, "Content-Type": "application/json"}
 
 
 def get_active_events():
+    print(f"Fetching active events from {INGEST_URL}")
     r = requests.get(INGEST_URL, headers=HEADERS, timeout=15)
+    print(f"  Response: {r.status_code}")
+    if r.status_code == 401:
+        print("  ERROR: Invalid INGEST_SECRET — check Vercel env vars")
+        sys.exit(1)
     r.raise_for_status()
-    return r.json()
+    events = r.json()
+    print(f"  Found {len(events)} active events")
+    for e in events:
+        print(f"    [{e.get('platform')}] {e.get('name')} — {e.get('url', '')[:60]}")
+    return events
 
 
 # ── Platform scrapers ────────────────────────────────────────────────────────
 
-def scrape_gruposmedia(page, url):
-    """Already handled by Vercel — skip."""
-    return []
-
-
 def scrape_todaslasentradas(page, url):
+    print(f"  Loading {url}")
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
     page.wait_for_timeout(3000)
 
-    # Try arraySesiones first (same platform family)
+    # Try arraySesiones (Palco4 platform)
     raw = page.evaluate("typeof arraySesiones !== 'undefined' ? JSON.stringify(arraySesiones) : null")
     if raw:
+        print(f"  Found arraySesiones!")
         sessions = json.loads(raw)
         return [
             {
-                "session_id": str(s.get("idSesion", "")),
+                "session_id": str(s.get("idSesion", "main")),
                 "label": s.get("litSesion") or s.get("fechaCelebracionStr", ""),
                 "date": (s.get("fecha") or s.get("fechaCelebracionStr", ""))[:10],
                 "capacity": s.get("aforo", 0),
@@ -45,91 +55,83 @@ def scrape_todaslasentradas(page, url):
             for s in sessions if not s.get("streamingOnly")
         ]
 
-    # Fallback: count seat elements
-    libre   = len(page.query_selector_all(".ButacaLibre, .butaca-libre, [class*='libre']"))
-    ocupada = len(page.query_selector_all(".ButacaOcupada, .butaca-ocupada, [class*='ocupad'], [class*='vendid']"))
-    total   = libre + ocupada
-    if total == 0:
-        return []
+    # Count seat DOM elements
+    selectors = [
+        (".ButacaLibre", ".ButacaOcupada,.ButacaNoDisponible,.ButacaVendida"),
+        ("[class*='libre']", "[class*='ocupad'],[class*='vendid']"),
+        (".seat-available", ".seat-taken,.seat-sold"),
+    ]
+    for (sel_libre, sel_ocup) in selectors:
+        libre   = len(page.query_selector_all(sel_libre))
+        ocupada = len(page.query_selector_all(sel_ocup))
+        if libre + ocupada > 5:
+            print(f"  Seats via DOM: {libre} libre, {ocupada} ocupada")
+            return [{"session_id": "main", "label": page.title(), "date": "",
+                     "capacity": libre + ocupada, "sold": ocupada, "reserved": 0}]
 
-    title = page.title()
-    return [{
-        "session_id": "main",
-        "label": title,
-        "date": "",
-        "capacity": total,
-        "sold": ocupada,
-        "reserved": 0,
-    }]
+    print(f"  No seat data found. Page title: {page.title()}")
+    return []
 
 
 def scrape_bacantix(page, url):
+    print(f"  Loading {url}")
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
     page.wait_for_timeout(4000)
 
-    # Count seat labels
-    libre   = len(page.query_selector_all("[class*='Libre'], [class*='libre'], [title*='Libre']"))
-    ocupado = len(page.query_selector_all("[class*='Ocupado'], [class*='ocupado'], [class*='Vendido'], [title*='Ocupado']"))
-    total   = libre + ocupado
-    if total == 0:
-        return []
+    selectors = [
+        ("[class*='Libre']", "[class*='Ocupado'],[class*='Vendido']"),
+        ("[title='Libre']", "[title='Ocupado'],[title='Vendido']"),
+        (".libre", ".ocupado,.vendido"),
+    ]
+    for (sel_libre, sel_ocup) in selectors:
+        libre   = len(page.query_selector_all(sel_libre))
+        ocupada = len(page.query_selector_all(sel_ocup))
+        if libre + ocupada > 5:
+            print(f"  Seats via DOM: {libre} libre, {ocupada} ocupada")
+            return [{"session_id": "main", "label": page.title(), "date": "",
+                     "capacity": libre + ocupada, "sold": ocupada, "reserved": 0}]
 
-    title = page.title()
-    return [{
-        "session_id": "main",
-        "label": title,
-        "date": "",
-        "capacity": total,
-        "sold": ocupado,
-        "reserved": 0,
-    }]
+    print(f"  No seat data found. Page title: {page.title()}")
+    return []
 
 
 def scrape_reservaentradas(page, url):
+    print(f"  Loading {url}")
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
     page.wait_for_timeout(3000)
 
-    # Look for availability numbers in the page
     text = page.inner_text("body")
-    # Try to find patterns like "X disponibles" or "X entradas"
     m = re.search(r"(\d+)\s+disponibles?", text, re.IGNORECASE)
     if m:
         avail = int(m.group(1))
-        # Try to get total
-        t = re.search(r"(\d+)\s+(?:total|aforo|entradas totales)", text, re.IGNORECASE)
+        t = re.search(r"(\d+)\s+(?:total|aforo)", text, re.IGNORECASE)
         total = int(t.group(1)) if t else 0
-        sold = total - avail if total > 0 else 0
-        title = page.title()
-        return [{
-            "session_id": "main",
-            "label": title,
-            "date": "",
-            "capacity": total,
-            "sold": sold,
-            "reserved": 0,
-        }]
+        print(f"  disponibles={avail}, total={total}")
+        return [{"session_id": "main", "label": page.title(), "date": "",
+                 "capacity": total, "sold": max(0, total - avail), "reserved": 0}]
+
+    print(f"  No availability text found. Page title: {page.title()}")
     return []
 
 
 SCRAPERS = {
-    "gruposmedia":       scrape_gruposmedia,
-    "todaslasentradas":  scrape_todaslasentradas,
-    "bacantix":          scrape_bacantix,
-    "reservaentradas":   scrape_reservaentradas,
+    "todaslasentradas": scrape_todaslasentradas,
+    "bacantix":         scrape_bacantix,
+    "reservaentradas":  scrape_reservaentradas,
 }
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    events = get_active_events()
-    # Only scrape platforms that need a browser (skip gruposmedia — Vercel handles it)
-    targets = [e for e in events if e.get("platform") in SCRAPERS and e["platform"] != "gruposmedia"]
+    events  = get_active_events()
+    targets = [e for e in events if e.get("platform") in SCRAPERS]
 
+    print(f"\nTargets to scrape: {len(targets)}")
     if not targets:
-        print("No browser-scraping targets found.")
+        print("No browser-scraping targets. Done.")
         return
 
     results = []
@@ -144,10 +146,9 @@ def main():
         for event in targets:
             platform = event["platform"]
             url      = event["url"]
-            print(f"Scraping [{platform}] {event['name']} — {url}")
+            print(f"\n[{platform}] {event['name']}")
             try:
-                scraper  = SCRAPERS[platform]
-                sessions = scraper(page, url)
+                sessions = SCRAPERS[platform](page, url)
                 if sessions:
                     results.append({
                         "eventId":    event["id"],
@@ -156,21 +157,20 @@ def main():
                         "sessions":   sessions,
                     })
                     for s in sessions:
-                        print(f"  {s['label']}: {s['sold']} vendidas / {s['capacity']} aforo")
-                else:
-                    print(f"  No data found")
+                        print(f"  -> {s['label']}: {s['sold']} vendidas / {s['capacity']} aforo")
             except PWTimeout:
-                print(f"  TIMEOUT")
+                print(f"  TIMEOUT loading page")
             except Exception as ex:
                 print(f"  ERROR: {ex}")
 
         browser.close()
 
+    print(f"\nSending {len(results)} results to ingest...")
     if results:
         r = requests.post(INGEST_URL, json={"results": results}, headers=HEADERS, timeout=15)
-        print(f"\nIngest response: {r.status_code} {r.text}")
+        print(f"Ingest: {r.status_code} — {r.text}")
     else:
-        print("\nNothing to ingest.")
+        print("Nothing scraped, nothing sent.")
 
 
 if __name__ == "__main__":
