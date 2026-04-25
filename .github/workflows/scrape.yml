@@ -30,3 +30,11 @@ jobs:
           INGEST_URL: ${{ secrets.INGEST_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
         run: python scripts/scrape_external.py
+
+      - name: Upload debug HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-html
+          path: debug_html/
+          retention-days: 1
