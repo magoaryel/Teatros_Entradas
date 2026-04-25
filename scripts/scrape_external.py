@@ -285,127 +285,72 @@ def scrape_auditoriocartuja(page, url):
 
 
 # ── reservaentradas.com ───────────────────────────────────────────────────────
-# Angular app. Navigate to the event URL + ?step=2 with Playwright so Angular
-# fires the real selbutacav2 call (the static HTML has sesion=12345 placeholder).
-# Intercept the API response to parse sold vs available seats.
+# Reverse-engineered: page calls sesionv2 on a venue subdomain.
+# URL: https://{slug}.reservaentradas.com/{slug}/sesionv2?recinto={id}&sesion={eventId}&key=apirswebphp
+# Returns Aforo (total) and Disponibles (available) → sold = Aforo - Disponibles
+# No Playwright needed — pure HTTP.
 
-def scrape_reservaentradas(page, url):
-    # Build step=2 URL from whatever is stored in the DB
-    base = url.rstrip("/")
-    target = base + ("&step=2" if "?" in base else "?step=2")
-    if "step=2" in base:
-        target = base  # already has it
+def scrape_reservaentradas(_, url):
+    # Extract venue slug and event ID from URL
+    # Pattern: /entrada/{city}/{venue_slug}/{event_slug}/{event_id}/
+    m = re.search(r'/entrada/[^/]+/([^/]+)/[^/]+/(\d+)', url)
+    if not m:
+        print("  Could not parse venue slug / event ID from URL")
+        return []
+    venue_slug = m.group(1)   # e.g. "teatrocinesortega"
+    event_id   = m.group(2)   # e.g. "18636"
+    print(f"  venue={venue_slug}, event_id={event_id}")
 
-    api_body = []
-
-    def on_response(resp):
-        # Capture selbutacav2 AND any other reservaentradas API that might give real session
-        if "reservaentradas.com" in resp.url and resp.request.resource_type in ("xhr", "fetch"):
-            try:
-                api_body.append((resp.url, resp.body().decode("utf-8", errors="replace")))
-            except: pass
-
-    page.on("response", on_response)
-    page.goto(target, timeout=35000)
-    page.wait_for_load_state("networkidle", timeout=25000)
-    page.wait_for_timeout(5000)
-
-    # Accept cookies if present
+    # Get recinto ID from the page HTML (appears in selbutacav2 URL in the source)
     try:
-        btn = page.query_selector("button:has-text('Aceptar')")
-        if btn and btn.is_visible():
-            btn.click(); page.wait_for_timeout(1000)
-    except: pass
-
-    # ── Log all captured API calls (useful for debugging) ─────────────────────
-    print(f"  Captured {len(api_body)} API responses")
-    for api_url, body in api_body:
-        print(f"  API: {api_url[-80:]}")
-        print(f"  Body: {body[:200]}")
-
-    # ── Try parsing the selbutacav2 API response ──────────────────────────────
-    for api_url, body in api_body:
-        if "selbutacav2" not in api_url and "selbutaca" not in api_url:
-            continue
-
-        # Format A: XML  <I id="N" [O="201"] .../>
-        seats = re.findall(r'<I\s[^/]*/>', body)
-        if seats:
-            libre = sold = 0
-            for tag in seats:
-                o = re.search(r'O="(\d+)"', tag)
-                if not o:
-                    libre += 1
-                elif o.group(1) == "201":
-                    sold += 1
-            total = libre + sold
-            print(f"  XML parse: libre={libre}, sold={sold}, total={total}")
-            if total > 0:
-                label = _reserva_label(page)
-                return [{"session_id": "main", "label": label, "date": "2026-05-30",
-                         "capacity": total, "sold": sold, "reserved": 0}]
-
-        # Format B: JSON array
-        try:
-            seats_json = json.loads(body)
-            if isinstance(seats_json, list) and seats_json:
-                sold  = sum(1 for s in seats_json if str(s.get("estado","")).lower() in ("ocupada","vendida","sold","1"))
-                total = len(seats_json)
-                print(f"  JSON parse: total={total}, sold={sold}")
-                if total > 0:
-                    label = _reserva_label(page)
-                    return [{"session_id": "main", "label": label, "date": "2026-05-30",
-                             "capacity": total, "sold": sold, "reserved": 0}]
-        except: pass
-
-    # ── Fallback: count seats by rendered fill colour via DOM ─────────────────
-    print("  Inspecting rendered DOM for seat colours")
-    counts = page.evaluate("""() => {
-        // cursorPointer + butaca1 is the exact class combo for standard seats
-        const byClass = [...document.querySelectorAll('.cursorPointer.butaca1')];
-        // If Angular changed the markup, also try butacadetect
-        const byDetect = byClass.length > 0 ? byClass
-                         : [...document.querySelectorAll('.butacadetect')];
-        let total = byDetect.length, sold = 0;
-        byDetect.forEach(el => {
-            // Check SVG child fill OR computed background
-            const child = el.querySelector('rect,circle,path') || el;
-            const fill  = (child.getAttribute('fill') || '').toLowerCase();
-            const style = window.getComputedStyle(child);
-            const bg    = style.fill || style.backgroundColor || '';
-            // SVG className is SVGAnimatedString — must use getAttribute
-            const cls   = (el.getAttribute('class') || '').toLowerCase();
-            // Red-ish: high R, low G  e.g. rgb(200,30,30)
-            const rgbM  = bg.match(/rgb[(](\\d+),\\s*(\\d+),\\s*(\\d+)[)]/u);
-            const isRed = rgbM ? (parseInt(rgbM[1]) > 150 && parseInt(rgbM[2]) < 80) : false;
-            if (isRed || fill === 'red' || fill === '#e53935' || fill === '#c62828' ||
-                cls.includes('ocupad') || cls.includes('vendid')) {
-                sold++;
-            }
-        });
-        return {total, sold, selector: byClass.length > 0 ? 'cursorPointer.butaca1' : 'butacadetect'};
-    }""")
-    total = counts["total"]
-    sold  = counts["sold"]
-    print(f"  DOM ({counts['selector']}): total={total}, sold={sold}")
-    if total == 0:
-        print("  No seat data found")
+        page_resp = requests.get(
+            f"https://www.reservaentradas.com/entrada/sessionone/buy/{venue_slug}/tickets/{event_id}",
+            headers={"User-Agent": "Mozilla/5.0", "Referer": url}, timeout=15
+        )
+        recinto_m = re.search(r'recinto=(\d+)', page_resp.text)
+        recinto = recinto_m.group(1) if recinto_m else "0"
+    except Exception as e:
+        print(f"  Could not fetch page for recinto: {e}")
         return []
 
-    label = _reserva_label(page)
-    return [{"session_id": "main", "label": label, "date": "2026-05-30",
-             "capacity": total, "sold": sold, "reserved": 0}]
+    print(f"  recinto={recinto}")
+    if recinto == "0":
+        print("  recinto not found in page")
+        return []
 
-
-def _reserva_label(page):
+    # Call the real sesionv2 API
+    api_url = (f"https://{venue_slug}.reservaentradas.com/{venue_slug}/sesionv2"
+               f"?recinto={recinto}&UUID=scraper&sesion={event_id}&referer=&key=apirswebphp")
     try:
-        body = page.inner_text("body")
-        m = re.search(r'(\d{1,2})/(\d{2})/(\d{4})\s+(\d{2}:\d{2})', body)
-        if m:
-            return f"{m.group(3)}-{m.group(2)}-{m.group(1).zfill(2)}T{m.group(4)}"
-        return page.title()
-    except:
-        return "2026-05-30T20:00"
+        jr = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0", "Referer": url}, timeout=15)
+        data = jr.json()
+    except Exception as e:
+        print(f"  sesionv2 error: {e}")
+        return []
+
+    aforo      = data.get("Aforo", 0)
+    disponible = data.get("Disponibles", 0)
+    sold       = max(0, aforo - disponible)
+    print(f"  sesionv2: aforo={aforo}, disponibles={disponible}, sold={sold}")
+
+    if aforo == 0:
+        print("  No seat data in sesionv2")
+        return []
+
+    # Date from Sesion.FechaSesion ("30/05/2026") + Sesion.Horatxt ("20:00")
+    sesion   = data.get("Sesion") or {}
+    fecha    = sesion.get("FechaSesion") or sesion.get("Fecha") or ""
+    hora     = (sesion.get("Horatxt") or sesion.get("Hora") or "").strip()
+    dm = re.match(r'(\d{1,2})/(\d{2})/(\d{4})', fecha)
+    if dm:
+        date_iso = f"{dm.group(3)}-{dm.group(2)}-{dm.group(1).zfill(2)}"
+        label    = f"{date_iso}T{hora}" if hora else date_iso
+    else:
+        date_iso = ""
+        label    = fecha or event_id
+
+    return [{"session_id": event_id, "label": label, "date": date_iso,
+             "capacity": aforo, "sold": sold, "reserved": 0}]
 
 
 SCRAPERS = {
