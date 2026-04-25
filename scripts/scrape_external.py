@@ -129,30 +129,75 @@ def scrape_bacantix(page, url):
 # Angular app — must load base URL then click "Butacas" step to render seat map
 # butaca1 elements: count by computed fill color
 
+def _accept_cookies(page):
+    for sel in ['button:has-text("Aceptar")', 'button:has-text("Accept")',
+                'button:has-text("Acepto")', '#onetrust-accept-btn-handler',
+                '.accept-cookies', '[class*="cookie"] button']:
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(800)
+                return
+        except: pass
+
+
 def scrape_reservaentradas(page, url):
-    # Remove ?step=2 — must navigate properly through steps
+    # Remove ?step=N — must navigate step by step (Angular holds state in memory)
     base_url = re.sub(r'\?.*$', '', url)
 
     page.goto(base_url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
     page.wait_for_timeout(2000)
 
-    # Click the "Butacas" step link/button
-    clicked = False
-    for selector in ['a:has-text("Butacas")', 'button:has-text("Butacas")',
-                     '[href*="step=2"]', 'li:has-text("Butacas") a', '.step-butacas']:
-        btn = page.query_selector(selector)
-        if btn:
-            btn.click()
-            clicked = True
-            break
+    # Accept cookies/GDPR banner
+    _accept_cookies(page)
+    page.wait_for_timeout(1000)
 
-    page.wait_for_timeout(6000)  # Wait for Angular to render seat map
+    # Try to click "Butacas" step via multiple strategies
+    clicked = False
+
+    # Strategy 1: Playwright get_by_text
+    try:
+        loc = page.get_by_text("Butacas", exact=False).first
+        if loc.is_visible():
+            loc.click()
+            clicked = True
+    except: pass
+
+    # Strategy 2: querySelector with various selectors
+    if not clicked:
+        for sel in ['a:has-text("Butacas")', 'button:has-text("Butacas")',
+                    '[href*="step=2"]', 'li:has-text("Butacas")', 'span:has-text("Butacas")']:
+            try:
+                btn = page.query_selector(sel)
+                if btn and btn.is_visible():
+                    btn.click()
+                    clicked = True
+                    break
+            except: pass
+
+    # Strategy 3: evaluate JS click on element containing text
+    if not clicked:
+        clicked = page.evaluate("""() => {
+            const els = [...document.querySelectorAll('a,button,li,span,div')];
+            const el = els.find(e => e.textContent.trim().includes('Butacas') && e.offsetParent !== null);
+            if (el) { el.click(); return true; }
+            return false;
+        }""")
+
+    page.wait_for_timeout(7000)  # Wait for Angular to render seat map
     print(f"  Navigated to seat map (clicked={clicked})")
 
     # Count butaca1 elements — these are the interactive seats
     butaca_count = len(page.query_selector_all(".butaca1"))
     print(f"  butaca1 elements: {butaca_count}")
+
+    # Retry once if still 0
+    if butaca_count == 0:
+        page.wait_for_timeout(5000)
+        butaca_count = len(page.query_selector_all(".butaca1"))
+        print(f"  butaca1 after retry: {butaca_count}")
 
     if butaca_count == 0:
         print("  No seat elements found")
