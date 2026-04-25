@@ -195,34 +195,14 @@ def scrape_auditoriocartuja(page, url):
         print("  No valid Janto code found")
         return []
 
-    # API returns {"sessions": [sessionId, ...], "numbered": ..., "status": ...}
-    # sessions is a list of session ID strings — must fetch each one individually
+    # API returns {"sessions": {sessionId: {percentAvailable, maxTickets, desc3, ...}}, ...}
+    # sessions is a dict — values are the full session objects, no extra API call needed
     if isinstance(data, dict) and "sessions" in data:
-        session_ids = data["sessions"]
-        print(f"  Event status: {data.get('status')} | session_ids: {session_ids}")
+        sessions_val = data["sessions"]
+        raw_sessions = list(sessions_val.values()) if isinstance(sessions_val, dict) else sessions_val
+        print(f"  Event status: {data.get('status')} | sessions: {len(raw_sessions)}")
     else:
-        session_ids = data if isinstance(data, list) else []
-
-    # Fetch each session's availability
-    raw_sessions = []
-    for sid in session_ids:
-        for sess_ep in [
-            f"https://apiw5.janto.es/v5/sessions/{used_code}/{sid}",
-            f"https://apiw5.janto.es/v5/sessions/{sid}",
-        ]:
-            try:
-                sr = requests.get(sess_ep, headers=janto_headers, timeout=15)
-                sr.raise_for_status()
-                sdata = sr.json()
-                print(f"  Session {sid} → {sess_ep.split('janto.es')[1]} keys={list(sdata.keys()) if isinstance(sdata, dict) else type(sdata).__name__}")
-                raw_sessions.append(sdata)
-                break
-            except Exception as e:
-                print(f"  Session {sid} → {sess_ep.split('janto.es')[1]} error: {e}")
-
-    if not raw_sessions:
-        print("  No session data fetched")
-        return []
+        raw_sessions = data if isinstance(data, list) else [data]
 
     results = []
     for s in raw_sessions:
@@ -240,15 +220,16 @@ def scrape_auditoriocartuja(page, url):
 
         sold = max(0, total - available)
 
-        raw = str(s.get("sessionDate", ""))
+        # Date is in desc3 field as "20261029214500" (YYYYMMDDHHMMSS)
+        raw = str(s.get("desc3") or s.get("sessionDate") or "")
         if len(raw) >= 12:
             label    = f"{raw[6:8]}/{raw[4:6]}/{raw[:4]} {raw[8:10]}:{raw[10:12]}"
             date_iso = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
         else:
-            label    = raw or page.title() if hasattr(page, "title") else raw
+            label    = s.get("InfoEvSes1", "") or raw
             date_iso = ""
 
-        session_id = str(s.get("sessionId") or s.get("sessionDate") or "main")
+        session_id = str(s.get("idSession") or s.get("sessionDate") or "main")
         print(f"  Session {label}: available={available}, total={total}, sold={sold}")
 
         results.append({
