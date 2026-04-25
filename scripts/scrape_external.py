@@ -198,54 +198,107 @@ def scrape_auditoriocartuja(page, url):
 
 
 # ── reservaentradas.com ───────────────────────────────────────────────────────
-# Angular app — must load base URL then click "Butacas" step to render seat map
-# butaca1 elements: count by computed fill color
+# Angular app. Navigate to the event URL + ?step=2 with Playwright so Angular
+# fires the real selbutacav2 call (the static HTML has sesion=12345 placeholder).
+# Intercept the API response to parse sold vs available seats.
 
-def _accept_cookies(page):
-    for sel in ['button:has-text("Aceptar")', 'button:has-text("Accept")',
-                'button:has-text("Acepto")', '#onetrust-accept-btn-handler',
-                '.accept-cookies', '[class*="cookie"] button']:
+def scrape_reservaentradas(page, url):
+    # Build step=2 URL from whatever is stored in the DB
+    base = url.rstrip("/")
+    target = base + ("&step=2" if "?" in base else "?step=2")
+    if "step=2" in base:
+        target = base  # already has it
+
+    api_body = []
+
+    def on_response(resp):
+        if "selbutacav2" in resp.url or "selbutaca" in resp.url:
+            try:
+                api_body.append((resp.url, resp.body().decode("utf-8", errors="replace")))
+            except: pass
+
+    page.on("response", on_response)
+    page.goto(target, timeout=35000)
+    page.wait_for_load_state("networkidle", timeout=25000)
+    page.wait_for_timeout(4000)
+
+    # Accept cookies if present
+    try:
+        btn = page.query_selector("button:has-text('Aceptar')")
+        if btn and btn.is_visible():
+            btn.click(); page.wait_for_timeout(1000)
+    except: pass
+
+    # ── Try parsing the selbutacav2 API response ──────────────────────────────
+    for api_url, body in api_body:
+        print(f"  selbutacav2 captured: {api_url[-60:]}")
+        print(f"  Body preview: {body[:300]}")
+
+        # Format is XML: <I id="N" [O="201"] .../>  (same family as bacantix)
+        seats = re.findall(r'<I\s[^/]*/>', body)
+        if seats:
+            libre = sold = 0
+            for tag in seats:
+                o = re.search(r'O="(\d+)"', tag)
+                if not o:
+                    libre += 1
+                elif o.group(1) == "201":
+                    sold += 1
+            total = libre + sold
+            print(f"  XML parse: libre={libre}, sold={sold}, total={total}")
+            if total > 0:
+                label = _reserva_label(page)
+                return [{"session_id": "main", "label": label, "date": "2026-05-30",
+                         "capacity": total, "sold": sold, "reserved": 0}]
+
+        # Try JSON array of seat objects
         try:
-            btn = page.query_selector(sel)
-            if btn and btn.is_visible():
-                btn.click()
-                page.wait_for_timeout(800)
-                return
+            seats_json = json.loads(body)
+            if isinstance(seats_json, list) and seats_json:
+                sold  = sum(1 for s in seats_json if str(s.get("estado","")).lower() in ("ocupada","vendida","sold","1"))
+                total = len(seats_json)
+                print(f"  JSON parse: total={total}, sold={sold}")
+                if total > 0:
+                    label = _reserva_label(page)
+                    return [{"session_id": "main", "label": label, "date": "2026-05-30",
+                             "capacity": total, "sold": sold, "reserved": 0}]
         except: pass
 
-
-def scrape_reservaentradas(_, url):
-    """
-    reservaentradas.com uses sesion=12345 (hardcoded placeholder) in the page HTML.
-    The selbutacav2 API always fails → seat colors are identical → can't detect sold count.
-    We use a plain HTTP request to get total capacity from the server-rendered HTML.
-    Sold count is always 0 (tracking unavailable until venue fixes their config).
-    """
-    import urllib.request as ureq
-    try:
-        req = ureq.Request(
-            "https://www.reservaentradas.com/entrada/sessionone/buy/teatrocinesortega/tickets/18636"
-            "?destatic=false&sala=0&port=&step=2",
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        with ureq.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"  HTTP error: {e}")
-        return []
-
-    import re as re2
-    butaca1 = len(re2.findall(r'cursorPointer butaca1', html))
-    print(f"  butaca1 (standard seats): {butaca1}")
-    if butaca1 == 0:
+    # ── Fallback: count seats by rendered fill colour via DOM ─────────────────
+    print("  selbutacav2 not captured — inspecting rendered DOM")
+    counts = page.evaluate("""() => {
+        const seats = [...document.querySelectorAll('.butacadetect, [class*="butaca1"]')];
+        let total = seats.length, sold = 0;
+        seats.forEach(el => {
+            const child = el.querySelector('rect,circle,path,g') || el;
+            const fill  = (child.getAttribute('fill') || '').toLowerCase();
+            const cls   = (el.getAttribute('class') || '').toLowerCase();
+            if (fill === 'red' || fill.startsWith('#e') || fill.startsWith('#c') ||
+                cls.includes('ocupad') || cls.includes('vendid') || cls.includes('sold')) {
+                sold++;
+            }
+        });
+        return {total, sold};
+    }""")
+    total = counts["total"]
+    sold  = counts["sold"]
+    print(f"  DOM fallback: total={total}, sold={sold}")
+    if total == 0:
         print("  No seat data found")
         return []
 
-    date_m = re2.search(r'\d{1,2}/\d{2}/\d{4}\s+\d{2}:\d{2}', html)
-    label = date_m.group(0) if date_m else "30/05/2026 20:00"
-    print(f"  NOTE: sesion=12345 hardcoded, sold count unavailable")
+    label = _reserva_label(page)
     return [{"session_id": "main", "label": label, "date": "2026-05-30",
-             "capacity": butaca1, "sold": 0, "reserved": 0}]
+             "capacity": total, "sold": sold, "reserved": 0}]
+
+
+def _reserva_label(page):
+    try:
+        body = page.inner_text("body")
+        m = re.search(r'\d{1,2}/\d{2}/\d{4}\s+\d{2}:\d{2}', body)
+        return m.group(0) if m else page.title()
+    except:
+        return "30/05/2026 20:00"
 
 
 SCRAPERS = {
