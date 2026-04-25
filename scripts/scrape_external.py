@@ -141,7 +141,20 @@ def scrape_auditoriocartuja(page, url):
     api_codes = re.findall(r'apiw5\.janto\.es/[^/]+/sessions/([A-Z0-9]+)', html)
     standalone = re.findall(r'["\'/]([A-Z]\d{6}[A-Z]{2,})["\'/]', html)
     all_codes = list(dict.fromkeys(api_codes + standalone))  # deduplicate, keep order
-    print(f"  Janto codes found: {all_codes}")
+
+    # Prefer code associated with the URL fragment (e.g. #web5) — look in that HTML section
+    fragment = url.split("#")[-1] if "#" in url else ""
+    if fragment:
+        frag_m = re.search(
+            rf'id=["\']?{re.escape(fragment)}["\']?[^>]*>[\s\S]{{0,2000}}?([A-Z]\d{{6}}[A-Z]{{2,}})',
+            html
+        )
+        if frag_m and frag_m.group(1) in all_codes:
+            frag_code = frag_m.group(1)
+            all_codes = [frag_code] + [c for c in all_codes if c != frag_code]
+            print(f"  Fragment #{fragment} → code {frag_code} (prioritised)")
+
+    print(f"  Janto codes to try: {all_codes[:4]}...")
 
     # Referer required by Janto API — must match the venue domain
     from urllib.parse import urlparse
@@ -182,9 +195,17 @@ def scrape_auditoriocartuja(page, url):
         print("  No valid Janto code found")
         return []
 
-    sessions = data if isinstance(data, list) else [data]
+    # API wraps sessions in {"sessions": [...], "numbered": ..., "status": ...}
+    if isinstance(data, dict) and "sessions" in data:
+        raw_sessions = data["sessions"]
+        print(f"  Event status: {data.get('status')} | sessions: {len(raw_sessions)}")
+    elif isinstance(data, list):
+        raw_sessions = data
+    else:
+        raw_sessions = [data]
+
     results = []
-    for s in sessions:
+    for s in raw_sessions:
         mt        = s.get("maxTickets") or {}
         available = mt.get("availableTickets", 0)
         pct_avail = float(s.get("percentAvailable", 1.0))
