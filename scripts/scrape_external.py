@@ -195,17 +195,39 @@ def scrape_auditoriocartuja(page, url):
         print("  No valid Janto code found")
         return []
 
-    # API wraps sessions in {"sessions": [...], "numbered": ..., "status": ...}
+    # API returns {"sessions": [sessionId, ...], "numbered": ..., "status": ...}
+    # sessions is a list of session ID strings — must fetch each one individually
     if isinstance(data, dict) and "sessions" in data:
-        raw_sessions = data["sessions"]
-        print(f"  Event status: {data.get('status')} | sessions: {len(raw_sessions)}")
-    elif isinstance(data, list):
-        raw_sessions = data
+        session_ids = data["sessions"]
+        print(f"  Event status: {data.get('status')} | session_ids: {session_ids}")
     else:
-        raw_sessions = [data]
+        session_ids = data if isinstance(data, list) else []
+
+    # Fetch each session's availability
+    raw_sessions = []
+    for sid in session_ids:
+        for sess_ep in [
+            f"https://apiw5.janto.es/v5/sessions/{used_code}/{sid}",
+            f"https://apiw5.janto.es/v5/sessions/{sid}",
+        ]:
+            try:
+                sr = requests.get(sess_ep, headers=janto_headers, timeout=15)
+                sr.raise_for_status()
+                sdata = sr.json()
+                print(f"  Session {sid} → {sess_ep.split('janto.es')[1]} keys={list(sdata.keys()) if isinstance(sdata, dict) else type(sdata).__name__}")
+                raw_sessions.append(sdata)
+                break
+            except Exception as e:
+                print(f"  Session {sid} → {sess_ep.split('janto.es')[1]} error: {e}")
+
+    if not raw_sessions:
+        print("  No session data fetched")
+        return []
 
     results = []
     for s in raw_sessions:
+        if not isinstance(s, dict):
+            continue
         mt        = s.get("maxTickets") or {}
         available = mt.get("availableTickets", 0)
         pct_avail = float(s.get("percentAvailable", 1.0))
