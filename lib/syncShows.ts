@@ -10,7 +10,8 @@ export interface DiscoveredShow {
   name: string;
   venue: string;
   city: string;
-  date: string;
+  date: string;        // human readable "15 de junio de 2026"
+  isoDate: string;     // "2026-06-15" for sorting
   ticketUrl: string | null;
   pageUrl: string;
 }
@@ -56,11 +57,27 @@ async function parseEventPage(pageUrl: string): Promise<DiscoveredShow | null> {
     const cityM = name.match(/(?:en|EN)\s+([A-ZÁÉÍÓÚÑ][A-Za-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñ]+)?)/);
     const city = cityM?.[1] ?? "";
 
-    // Date
+    // Date — human readable
     const dateM = html.match(/\d{1,2}\s+de\s+\w+\s+(?:de\s+)?\d{4}/i);
     const date = dateM?.[0] ?? "";
 
-    return { slug, name, venue, city, date, ticketUrl, pageUrl };
+    // ISO date for sorting
+    const MONTHS: Record<string, string> = {
+      enero:"01", febrero:"02", marzo:"03", abril:"04", mayo:"05", junio:"06",
+      julio:"07", agosto:"08", septiembre:"09", octubre:"10", noviembre:"11", diciembre:"12",
+    };
+    let isoDate = "";
+    if (date) {
+      const parts = date.toLowerCase().replace("de ", "").split(/\s+/);
+      if (parts.length >= 3) {
+        const day = parts[0].padStart(2, "0");
+        const month = MONTHS[parts[1]] ?? "01";
+        const year = parts[parts.length - 1];
+        isoDate = `${year}-${month}-${day}`;
+      }
+    }
+
+    return { slug, name, venue, city, date, isoDate, ticketUrl, pageUrl };
   } catch {
     return null;
   }

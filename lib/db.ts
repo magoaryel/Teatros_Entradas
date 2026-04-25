@@ -9,6 +9,7 @@ export interface Event {
   active: boolean;
   page_url: string | null;
   has_tickets: boolean;
+  show_date: string | null;
   created_at: string;
 }
 
@@ -56,6 +57,7 @@ export async function initDb() {
   `;
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS page_url TEXT`;
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS has_tickets BOOLEAN DEFAULT false`;
+  await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS show_date TEXT`;
   await db`
     CREATE TABLE IF NOT EXISTS sessions (
       id SERIAL PRIMARY KEY,
@@ -81,7 +83,16 @@ export async function initDb() {
 
 export async function getEvents(): Promise<Event[]> {
   const db = sql();
-  return db`SELECT * FROM events ORDER BY created_at DESC` as unknown as Promise<Event[]>;
+  // Sort by nearest upcoming session date, then by show_date, then by created_at
+  return db`
+    SELECT e.*,
+      COALESCE(
+        (SELECT MIN(s.session_date) FROM sessions s WHERE s.event_id = e.id AND s.session_date >= to_char(NOW(), 'YYYY-MM-DD')),
+        e.show_date
+      ) AS next_date
+    FROM events e
+    ORDER BY next_date ASC NULLS LAST, e.created_at ASC
+  ` as unknown as Promise<Event[]>;
 }
 
 export async function getActiveEvents(): Promise<Event[]> {
