@@ -143,20 +143,38 @@ def scrape_auditoriocartuja(page, url):
     all_codes = list(dict.fromkeys(api_codes + standalone))  # deduplicate, keep order
     print(f"  Janto codes found: {all_codes}")
 
-    # Try each code — skip ones that return 4xx/5xx (wrong event)
+    # Referer required by Janto API — must match the venue domain
+    from urllib.parse import urlparse
+    origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    janto_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120",
+        "Referer":    url,
+        "Origin":     origin,
+    }
+
+    # Try each code with multiple endpoint variants
     data = None
+    used_code = None
     for event_code in all_codes:
-        try:
-            jr = requests.get(
-                f"https://apiw5.janto.es/v5/sessions/{event_code}/full/01",
-                timeout=15
-            )
-            jr.raise_for_status()
-            data = jr.json()
-            print(f"  Using code: {event_code}")
+        for endpoint in [
+            f"https://apiw5.janto.es/v5/sessions/{event_code}/full/01",
+            f"https://apiw5.janto.es/v5/sessions/{event_code}/full",
+            f"https://apiw5.janto.es/v5/sessions/{event_code}",
+        ]:
+            try:
+                jr = requests.get(endpoint, headers=janto_headers, timeout=15)
+                jr.raise_for_status()
+                candidate = jr.json()
+                # Validate it contains session data (not an error object)
+                if isinstance(candidate, list) or (isinstance(candidate, dict) and "sessionDate" in candidate):
+                    data = candidate
+                    used_code = event_code
+                    print(f"  Using code {event_code} → {endpoint.split('sessions/')[1]}")
+                    break
+            except Exception as e:
+                print(f"  {event_code} {endpoint.split('sessions/')[1]} → {e}")
+        if data is not None:
             break
-        except Exception as e:
-            print(f"  Code {event_code} → {e}")
 
     if data is None:
         print("  No valid Janto code found")
@@ -289,9 +307,10 @@ def scrape_reservaentradas(page, url):
             const fill  = (child.getAttribute('fill') || '').toLowerCase();
             const style = window.getComputedStyle(child);
             const bg    = style.fill || style.backgroundColor || '';
-            const cls   = (el.className || '').toLowerCase();
+            // SVG className is SVGAnimatedString — must use getAttribute
+            const cls   = (el.getAttribute('class') || '').toLowerCase();
             // Red-ish: high R, low G  e.g. rgb(200,30,30)
-            const rgbM  = bg.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)\\)/);
+            const rgbM  = bg.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
             const isRed = rgbM ? (parseInt(rgbM[1]) > 150 && parseInt(rgbM[2]) < 80) : false;
             if (isRed || fill === 'red' || fill === '#e53935' || fill === '#c62828' ||
                 cls.includes('ocupad') || cls.includes('vendid')) {
