@@ -45,14 +45,19 @@ export default async function Dashboard() {
     );
   }
 
-  const BROWSER_PLATFORMS = ["todaslasentradas", "bacantix", "reservaentradas", "auditoriocartuja", "manual"];
-  const withTickets = events.filter(e => e.has_tickets && !BROWSER_PLATFORMS.includes(e.platform));
-  const browserPlatform = events.filter(e => e.has_tickets && BROWSER_PLATFORMS.includes(e.platform));
   const withoutTickets = events.filter(e => !e.has_tickets);
 
-  const eventData: (Event & { sessions: Session[] })[] = await Promise.all(
-    withTickets.map(async ev => ({ ...ev, sessions: await getEventSessions(ev.id) }))
+  // All events with ticket URLs — load their sessions regardless of platform
+  const allWithTickets: (Event & { sessions: Session[] })[] = await Promise.all(
+    events
+      .filter(e => e.has_tickets)
+      .map(async ev => ({ ...ev, sessions: await getEventSessions(ev.id) }))
   );
+
+  // If they have actual session data → show with full stats
+  // If no data yet → show as "pending" with link to buy manually
+  const eventData    = allWithTickets.filter(e => e.sessions.some(s => s.last_check));
+  const pendingData  = allWithTickets.filter(e => !e.sessions.some(s => s.last_check));
 
   const isEmpty = events.length === 0;
 
@@ -67,7 +72,7 @@ export default async function Dashboard() {
         </div>
         <div className="actions">
           <SyncButton />
-          {withTickets.length > 0 && <RefreshButton />}
+          {allWithTickets.length > 0 && <RefreshButton />}
         </div>
       </div>
 
@@ -207,21 +212,18 @@ export default async function Dashboard() {
         </>
       )}
 
-      {/* Shows with tickets on platforms that need a browser */}
-      {browserPlatform.length > 0 && (
+      {/* Shows with tickets but no data yet — waiting for GitHub Actions scrape */}
+      {pendingData.length > 0 && (
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "28px 0 16px" }}>
             <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)" }}>
-              Entradas online — ver manualmente
+              Entradas online — actualizando cada 10 min
             </div>
             <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
           </div>
-          <div style={{ background: "#1e1a0e", border: "1px solid #3a3010", borderRadius: 8, padding: "12px 16px", marginBottom: 14, fontSize: 12, color: "#c9a84c" }}>
-            ⚠ Estas plataformas requieren JavaScript para mostrar datos — consulta la venta entrando al link directamente.
-          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-            {browserPlatform.map(event => (
-              <div key={event.id} className="card" style={{ padding: 16, borderColor: "#3a3010" }}>
+            {pendingData.map(event => (
+              <div key={event.id} className="card" style={{ padding: 16 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>
                   {event.name}
                 </div>
@@ -231,10 +233,13 @@ export default async function Dashboard() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
                   <span className="badge badge-yellow">{event.platform}</span>
                   <div style={{ display: "flex", gap: 4 }}>
-                    <a href={event.url} target="_blank" className="btn btn-ghost btn-sm">Ver entradas →</a>
-                    {event.page_url && <a href={event.page_url} target="_blank" className="btn btn-ghost btn-sm">aryel.com</a>}
+                    <a href={event.url} target="_blank" className="btn btn-ghost btn-sm">Ver →</a>
+                    {event.page_url && <a href={event.page_url} target="_blank" className="btn btn-ghost btn-sm">showsaryel.com</a>}
                     <DeleteButton eventId={event.id} />
                   </div>
+                </div>
+                <div style={{ fontSize: 11, color: "#444", marginTop: 8 }}>
+                  Sin datos aún — el scraper automático actualizará en breve
                 </div>
               </div>
             ))}
