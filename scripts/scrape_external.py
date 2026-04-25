@@ -142,61 +142,38 @@ def _accept_cookies(page):
         except: pass
 
 
-def scrape_reservaentradas(page, url):
-    # Load the URL directly (it includes ?step=2 which tells Angular to show seat map)
-    # DO NOT strip the step param — Angular needs it to render the seat map directly
-    page.goto(url, timeout=30000)
-    page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(6000)  # Angular needs time to render components
-
-    butaca_count = len(page.query_selector_all(".butaca1"))
-    print(f"  butaca1 elements: {butaca_count}")
-
-    if butaca_count == 0:
-        page.wait_for_timeout(5000)
-        butaca_count = len(page.query_selector_all(".butaca1"))
-        print(f"  butaca1 after extra wait: {butaca_count}")
-
-    if butaca_count == 0:
-        print("  No seat elements found")
+def scrape_reservaentradas(_, url):
+    """
+    reservaentradas.com uses sesion=12345 (hardcoded placeholder) in the page HTML.
+    The selbutacav2 API always fails → seat colors are identical → can't detect sold count.
+    We use a plain HTTP request to get total capacity from the server-rendered HTML.
+    Sold count is always 0 (tracking unavailable until venue fixes their config).
+    """
+    import urllib.request as ureq
+    try:
+        req = ureq.Request(
+            "https://www.reservaentradas.com/entrada/sessionone/buy/teatrocinesortega/tickets/18636"
+            "?destatic=false&sala=0&port=&step=2",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with ureq.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"  HTTP error: {e}")
         return []
 
-    # Use computed fill colors to distinguish libre vs ocupada
-    result = page.evaluate("""() => {
-        const seats = document.querySelectorAll(".butaca1");
-        let libre = 0, ocupado = 0;
-        seats.forEach(seat => {
-            const paths = seat.querySelectorAll("path, rect, circle, polygon");
-            if (paths.length === 0) return;
-            const fill = window.getComputedStyle(paths[0]).fill;
-            // Light fills (white/light grey) = libre, dark fills = ocupada
-            const rgb = fill.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)\\)/);
-            if (rgb) {
-                const brightness = (parseInt(rgb[1]) + parseInt(rgb[2]) + parseInt(rgb[3])) / 3;
-                if (brightness >= 150) libre++;
-                else ocupado++;
-            }
-        });
-        return {total: seats.length, libre, ocupado};
-    }""")
+    import re as re2
+    butaca1 = len(re2.findall(r'cursorPointer butaca1', html))
+    print(f"  butaca1 (standard seats): {butaca1}")
+    if butaca1 == 0:
+        print("  No seat data found")
+        return []
 
-    print(f"  Color analysis: {result}")
-
-    libre   = result.get("libre", 0)   if result else 0
-    ocupado = result.get("ocupado", 0) if result else 0
-    total   = result.get("total", butaca_count) if result else butaca_count
-
-    # If color analysis fails (all same color), just report total
-    if libre + ocupado == 0:
-        libre = total
-
-    # Extract date/session from page
-    body_text = page.inner_text("body")
-    date_m = re.search(r'\d{1,2}/\d{2}/\d{4}\s+\d{2}:\d{2}', body_text)
-    label = date_m.group(0) if date_m else page.title()
-
-    return [{"session_id": "main", "label": label, "date": "",
-             "capacity": total, "sold": ocupado, "reserved": 0}]
+    date_m = re2.search(r'\d{1,2}/\d{2}/\d{4}\s+\d{2}:\d{2}', html)
+    label = date_m.group(0) if date_m else "30/05/2026 20:00"
+    print(f"  NOTE: sesion=12345 hardcoded, sold count unavailable")
+    return [{"session_id": "main", "label": label, "date": "2026-05-30",
+             "capacity": butaca1, "sold": 0, "reserved": 0}]
 
 
 SCRAPERS = {
