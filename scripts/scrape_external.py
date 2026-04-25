@@ -137,26 +137,29 @@ def scrape_auditoriocartuja(page, url):
         print(f"  HTTP error: {e}")
         return []
 
-    # Try Janto API URL pattern first, then standalone code pattern
-    code_m = re.search(r'apiw5\.janto\.es/[^/]+/sessions/([A-Z0-9]+)', html)
-    if not code_m:
-        code_m = re.search(r'["\'/]([A-Z]\d{6}[A-Z]{2,})["\'/]', html)
-    if not code_m:
-        print("  Janto event code not found in page")
-        return []
+    # Collect ALL Janto codes in the page (page may list multiple events)
+    api_codes = re.findall(r'apiw5\.janto\.es/[^/]+/sessions/([A-Z0-9]+)', html)
+    standalone = re.findall(r'["\'/]([A-Z]\d{6}[A-Z]{2,})["\'/]', html)
+    all_codes = list(dict.fromkeys(api_codes + standalone))  # deduplicate, keep order
+    print(f"  Janto codes found: {all_codes}")
 
-    event_code = code_m.group(1)
-    print(f"  Janto event code: {event_code}")
+    # Try each code — skip ones that return 4xx/5xx (wrong event)
+    data = None
+    for event_code in all_codes:
+        try:
+            jr = requests.get(
+                f"https://apiw5.janto.es/v5/sessions/{event_code}/full/01",
+                timeout=15
+            )
+            jr.raise_for_status()
+            data = jr.json()
+            print(f"  Using code: {event_code}")
+            break
+        except Exception as e:
+            print(f"  Code {event_code} → {e}")
 
-    try:
-        jr = requests.get(
-            f"https://apiw5.janto.es/v5/sessions/{event_code}/full/01",
-            timeout=15
-        )
-        jr.raise_for_status()
-        data = jr.json()
-    except Exception as e:
-        print(f"  Janto API error: {e}")
+    if data is None:
+        print("  No valid Janto code found")
         return []
 
     sessions = data if isinstance(data, list) else [data]
@@ -212,7 +215,8 @@ def scrape_reservaentradas(page, url):
     api_body = []
 
     def on_response(resp):
-        if "selbutacav2" in resp.url or "selbutaca" in resp.url:
+        # Capture selbutacav2 AND any other reservaentradas API that might give real session
+        if "reservaentradas.com" in resp.url and resp.request.resource_type in ("xhr", "fetch"):
             try:
                 api_body.append((resp.url, resp.body().decode("utf-8", errors="replace")))
             except: pass
@@ -220,7 +224,7 @@ def scrape_reservaentradas(page, url):
     page.on("response", on_response)
     page.goto(target, timeout=35000)
     page.wait_for_load_state("networkidle", timeout=25000)
-    page.wait_for_timeout(4000)
+    page.wait_for_timeout(5000)
 
     # Accept cookies if present
     try:
@@ -229,12 +233,18 @@ def scrape_reservaentradas(page, url):
             btn.click(); page.wait_for_timeout(1000)
     except: pass
 
+    # ── Log all captured API calls (useful for debugging) ─────────────────────
+    print(f"  Captured {len(api_body)} API responses")
+    for api_url, body in api_body:
+        print(f"  API: {api_url[-80:]}")
+        print(f"  Body: {body[:200]}")
+
     # ── Try parsing the selbutacav2 API response ──────────────────────────────
     for api_url, body in api_body:
-        print(f"  selbutacav2 captured: {api_url[-60:]}")
-        print(f"  Body preview: {body[:300]}")
+        if "selbutacav2" not in api_url and "selbutaca" not in api_url:
+            continue
 
-        # Format is XML: <I id="N" [O="201"] .../>  (same family as bacantix)
+        # Format A: XML  <I id="N" [O="201"] .../>
         seats = re.findall(r'<I\s[^/]*/>', body)
         if seats:
             libre = sold = 0
@@ -251,7 +261,7 @@ def scrape_reservaentradas(page, url):
                 return [{"session_id": "main", "label": label, "date": "2026-05-30",
                          "capacity": total, "sold": sold, "reserved": 0}]
 
-        # Try JSON array of seat objects
+        # Format B: JSON array
         try:
             seats_json = json.loads(body)
             if isinstance(seats_json, list) and seats_json:
@@ -265,24 +275,34 @@ def scrape_reservaentradas(page, url):
         except: pass
 
     # ── Fallback: count seats by rendered fill colour via DOM ─────────────────
-    print("  selbutacav2 not captured — inspecting rendered DOM")
+    print("  Inspecting rendered DOM for seat colours")
     counts = page.evaluate("""() => {
-        const seats = [...document.querySelectorAll('.butacadetect, [class*="butaca1"]')];
-        let total = seats.length, sold = 0;
-        seats.forEach(el => {
-            const child = el.querySelector('rect,circle,path,g') || el;
+        // cursorPointer + butaca1 is the exact class combo for standard seats
+        const byClass = [...document.querySelectorAll('.cursorPointer.butaca1')];
+        // If Angular changed the markup, also try butacadetect
+        const byDetect = byClass.length > 0 ? byClass
+                         : [...document.querySelectorAll('.butacadetect')];
+        let total = byDetect.length, sold = 0;
+        byDetect.forEach(el => {
+            // Check SVG child fill OR computed background
+            const child = el.querySelector('rect,circle,path') || el;
             const fill  = (child.getAttribute('fill') || '').toLowerCase();
-            const cls   = (el.getAttribute('class') || '').toLowerCase();
-            if (fill === 'red' || fill.startsWith('#e') || fill.startsWith('#c') ||
-                cls.includes('ocupad') || cls.includes('vendid') || cls.includes('sold')) {
+            const style = window.getComputedStyle(child);
+            const bg    = style.fill || style.backgroundColor || '';
+            const cls   = (el.className || '').toLowerCase();
+            // Red-ish: high R, low G  e.g. rgb(200,30,30)
+            const rgbM  = bg.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)\\)/);
+            const isRed = rgbM ? (parseInt(rgbM[1]) > 150 && parseInt(rgbM[2]) < 80) : false;
+            if (isRed || fill === 'red' || fill === '#e53935' || fill === '#c62828' ||
+                cls.includes('ocupad') || cls.includes('vendid')) {
                 sold++;
             }
         });
-        return {total, sold};
+        return {total, sold, selector: byClass.length > 0 ? 'cursorPointer.butaca1' : 'butacadetect'};
     }""")
     total = counts["total"]
     sold  = counts["sold"]
-    print(f"  DOM fallback: total={total}, sold={sold}")
+    print(f"  DOM ({counts['selector']}): total={total}, sold={sold}")
     if total == 0:
         print("  No seat data found")
         return []
