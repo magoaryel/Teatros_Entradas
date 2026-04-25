@@ -1,6 +1,9 @@
 """
-GitHub Actions scraper — Playwright scraper for JS-heavy ticket platforms.
-Sends results to /api/ingest.
+GitHub Actions scraper for JS-heavy ticket platforms.
+Findings:
+ - todaslasentradas.com: classes mapaLibre / mapaOcupada in HTML
+ - bacantix.com:  MCIAjax.aspx response XML — O attr absent=libre, O=201=vendida
+ - reservaentradas.com: Angular, need to navigate base→click Butacas step, then count butaca1
 """
 import os, json, re, sys, requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -15,28 +18,28 @@ HEADERS = {"x-ingest-secret": INGEST_SECRET, "Content-Type": "application/json"}
 
 
 def get_active_events():
-    print(f"Fetching events from {INGEST_URL}")
+    print(f"Fetching events from Vercel...")
     r = requests.get(INGEST_URL, headers=HEADERS, timeout=15)
     if r.status_code == 401:
         print("ERROR 401: check INGEST_SECRET in Vercel env vars"); sys.exit(1)
     r.raise_for_status()
-    events = r.json()
+    events  = r.json()
     targets = [e for e in events if e.get("platform") in SCRAPERS]
     print(f"Found {len(events)} events, {len(targets)} to scrape")
     for e in targets:
-        print(f"  [{e.get('platform')}] {e.get('name')} — {e.get('url', '')[:80]}")
+        print(f"  [{e['platform']}] {e['name']} — {e['url'][:80]}")
     return events
 
 
-# ── todaslasentradas.com ─────────────────────────────────────────────────────
-# Seat classes confirmed from HTML: .mapaLibre and .mapaOcupada
+# ── todaslasentradas.com ──────────────────────────────────────────────────────
+# Classes confirmed in HTML: mapaLibre / mapaOcupada
 
 def scrape_todaslasentradas(page, url):
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
     page.wait_for_timeout(2000)
 
-    # Try Palco4 arraySesiones first
+    # Try Palco4 arraySesiones (same platform family)
     raw = page.evaluate("typeof arraySesiones !== 'undefined' ? JSON.stringify(arraySesiones) : null")
     if raw:
         sessions = json.loads(raw)
@@ -47,161 +50,150 @@ def scrape_todaslasentradas(page, url):
                  "reserved": s.get("entradasReservadas", 0)}
                 for s in sessions if not s.get("streamingOnly")]
 
-    # Use confirmed CSS classes from HTML analysis
     libre   = len(page.query_selector_all("[class*='mapaLibre']"))
     ocupada = len(page.query_selector_all("[class*='mapaOcupada']"))
     total   = libre + ocupada
-    print(f"  mapaLibre={libre}, mapaOcupada={ocupada}, total={total}")
+    print(f"  mapaLibre={libre}, mapaOcupada={ocupada}")
 
     if total == 0:
         print("  No seat data found")
         return []
 
-    title = page.title()
-    # Extract date from page body
+    # Extract date/label from page body
     body  = page.inner_text("body")
-    date_m = re.search(r'\d{1,2}\s+\w+\s+\d{4}', body)
-    label = date_m.group(0) if date_m else title
+    # Pattern: "Sábado 16 mayo 19:00" or "16 mayo 2026 19:00"
+    date_m = re.search(r'(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo)\s+\d+\s+\w+\s+\d{2}:\d{2}', body, re.IGNORECASE)
+    if not date_m:
+        date_m = re.search(r'\d{1,2}\s+(?:de\s+)?\w+\s+(?:de\s+)?\d{4}', body)
+    label = date_m.group(0).strip() if date_m else page.title()
 
     return [{"session_id": "main", "label": label, "date": "",
              "capacity": total, "sold": ocupada, "reserved": 0}]
 
 
-# ── bacantix.com ─────────────────────────────────────────────────────────────
-# NOTE: URL must include &codigo= parameter (fixed in syncShows.ts)
+# ── bacantix.com ──────────────────────────────────────────────────────────────
+# MCIAjax.aspx XML: no O attr = libre, O="201" = vendida, O="90" = discapacitados (skip)
 
 def scrape_bacantix(page, url):
+    mci_body = []
+
+    def on_response(resp):
+        if "MCIAjax" in resp.url:
+            try: mci_body.append(resp.body().decode("utf-8", errors="replace"))
+            except: pass
+
+    page.on("response", on_response)
+
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(5000)
+    # Accept cookies if present
+    try:
+        btn = page.query_selector("button:has-text('Aceptar')")
+        if btn: btn.click(); page.wait_for_timeout(1000)
+    except: pass
+    page.wait_for_timeout(4000)
 
-    title = page.title()
-    print(f"  Title: {title}")
-
-    # Check if page loaded correctly
-    body = page.inner_text("body")
-    if "no está disponible" in body or "Oops" in body:
-        print(f"  Page not available — URL might be wrong")
-        print(f"  Body: {body[:200]}")
+    if not mci_body:
+        print("  MCIAjax response not captured")
         return []
 
-    # Try multiple seat selectors (bacantix uses various class conventions)
-    selectors_libre  = ["[class*='Libre']", "[class*='libre']", "[title='Libre']",
-                        ".asiento-libre", ".localidad-libre"]
-    selectors_ocup   = ["[class*='Ocupado']", "[class*='Vendido']", "[class*='ocupado']",
-                        "[title='Ocupado']", ".asiento-ocupado", ".localidad-ocupado"]
+    body = mci_body[0]
+    # Count numeric-id <I> elements by O attribute
+    all_seats = re.findall(r'<I id="(\d+)"([^/]*)/>', body)
+    libre = sold = 0
+    for _, attrs in all_seats:
+        o = re.search(r'O="(\d+)"', attrs)
+        if not o:
+            libre += 1       # no O attribute = available
+        elif o.group(1) == "201":
+            sold += 1        # O=201 = sold/occupied
+        # O=90 = disabled spaces, skip
 
-    libre  = sum(len(page.query_selector_all(s)) for s in selectors_libre)
-    ocupado = sum(len(page.query_selector_all(s)) for s in selectors_ocup)
-    print(f"  libre={libre}, ocupado={ocupado}")
+    total = libre + sold
+    print(f"  Libre={libre}, Vendidas(O=201)={sold}, Total={total}")
 
-    # Try SVG approach — count by computed fill color
-    if libre + ocupado == 0:
-        result = page.evaluate("""() => {
-            const seats = document.querySelectorAll('svg rect, svg circle, svg polygon');
-            const colors = {};
-            seats.forEach(el => {
-                const fill = window.getComputedStyle(el).fill;
-                colors[fill] = (colors[fill] || 0) + 1;
-            });
-            return colors;
-        }""")
-        print(f"  SVG computed colors: {result}")
-        if result:
-            # Most common colors: try to identify libre vs ocupado
-            sorted_colors = sorted(result.items(), key=lambda x: -x[1])
-            print(f"  Top colors: {sorted_colors[:5]}")
+    if total == 0:
+        print("  No seat data found in MCIAjax")
+        return []
 
-    if libre + ocupado > 5:
-        return [{"session_id": "main", "label": title, "date": "",
-                 "capacity": libre + ocupado, "sold": ocupado, "reserved": 0}]
+    # Extract date from body text
+    body_text = page.inner_text("body")
+    date_m = re.search(r'(?:lunes|martes|miércoles|jueves|viernes|sábado|domingo)[,\s]+\d+\s+\w+\s+\d{4}', body_text, re.IGNORECASE)
+    label = date_m.group(0).strip() if date_m else page.title()
 
-    print("  No seat data found")
-    return []
+    return [{"session_id": "main", "label": label, "date": "",
+             "capacity": total, "sold": sold, "reserved": 0}]
 
 
-# ── reservaentradas.com ──────────────────────────────────────────────────────
-# 617 butaca1 elements — state set via Angular (computed styles)
+# ── reservaentradas.com ───────────────────────────────────────────────────────
+# Angular app — must load base URL then click "Butacas" step to render seat map
+# butaca1 elements: count by computed fill color
 
 def scrape_reservaentradas(page, url):
-    page.goto(url, timeout=30000)
+    # Remove ?step=2 — must navigate properly through steps
+    base_url = re.sub(r'\?.*$', '', url)
+
+    page.goto(base_url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(5000)  # Extra wait for Angular
+    page.wait_for_timeout(2000)
 
-    title = page.title()
+    # Click the "Butacas" step link/button
+    clicked = False
+    for selector in ['a:has-text("Butacas")', 'button:has-text("Butacas")',
+                     '[href*="step=2"]', 'li:has-text("Butacas") a', '.step-butacas']:
+        btn = page.query_selector(selector)
+        if btn:
+            btn.click()
+            clicked = True
+            break
 
-    # Use page.evaluate to check computed fill colors of seat paths
-    # Each seat (butaca1) contains SVG paths — their color indicates state
-    result = page.evaluate("""() => {
-        const seats = document.querySelectorAll('.butaca1, .cursorPointer.butaca1');
-        let libre = 0, ocupado = 0, unknown = 0;
-        seats.forEach(seat => {
-            const paths = seat.querySelectorAll('path, rect, circle');
-            if (paths.length === 0) { unknown++; return; }
-            // Get computed fill of first significant path
-            const fill = window.getComputedStyle(paths[0]).fill;
-            // Typically: grey/dark = occupied, light/green/blue = available
-            // We'll collect the fills and analyze
-            if (fill) {
-                const rgb = fill.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)\\)/);
-                if (rgb) {
-                    const [r, g, b] = [parseInt(rgb[1]), parseInt(rgb[2]), parseInt(rgb[3])];
-                    const brightness = (r + g + b) / 3;
-                    // Dark grey (158,158,158) likely = occupied or default
-                    // White or light = available
-                    if (brightness > 200) libre++;
-                    else if (brightness < 100) ocupado++;
-                    else unknown++;
-                }
-            }
-        });
-        return { total: seats.length, libre, ocupado, unknown };
-    }""")
+    page.wait_for_timeout(6000)  # Wait for Angular to render seat map
+    print(f"  Navigated to seat map (clicked={clicked})")
 
-    print(f"  Angular seat analysis: {result}")
+    # Count butaca1 elements — these are the interactive seats
+    butaca_count = len(page.query_selector_all(".butaca1"))
+    print(f"  butaca1 elements: {butaca_count}")
 
-    # Also try getting all unique fill colors to understand the mapping
-    colors = page.evaluate("""() => {
-        const seats = document.querySelectorAll('.butaca1 path');
-        const colorMap = {};
-        seats.forEach(el => {
-            const fill = window.getComputedStyle(el).fill;
-            colorMap[fill] = (colorMap[fill] || 0) + 1;
-        });
-        return colorMap;
-    }""")
-    print(f"  Fill colors of butaca1 paths: {colors}")
-
-    total = result.get("total", 0) if result else 0
-    if total == 0:
-        # Fallback: text-based
-        body = page.inner_text("body")
-        for pattern in [r"(\d+)\s+disponibles?", r"(\d+)\s+libres?"]:
-            m = re.search(pattern, body, re.IGNORECASE)
-            if m:
-                avail = int(m.group(1))
-                print(f"  Text fallback: {avail} disponibles")
-                return [{"session_id": "main", "label": title, "date": "",
-                         "capacity": 0, "sold": 0, "reserved": 0}]
-        print("  No seat data found")
+    if butaca_count == 0:
+        print("  No seat elements found")
         return []
 
-    # If we got color data, use it
-    if colors:
-        sorted_c = sorted(colors.items(), key=lambda x: -x[1])
-        print(f"  Top fill colors: {sorted_c[:4]}")
-        # If two dominant colors, one is libre and one is ocupado
-        # We need to determine which is which — for now report total
-        # and mark unknown as available (conservative)
-        ocupado = result.get("ocupado", 0)
-        libre   = result.get("libre", 0) + result.get("unknown", 0)
-        if libre + ocupado == 0:
-            libre = total  # All seats, we don't know state yet
+    # Use computed fill colors to distinguish libre vs ocupada
+    result = page.evaluate("""() => {
+        const seats = document.querySelectorAll(".butaca1");
+        let libre = 0, ocupado = 0;
+        seats.forEach(seat => {
+            const paths = seat.querySelectorAll("path, rect, circle, polygon");
+            if (paths.length === 0) return;
+            const fill = window.getComputedStyle(paths[0]).fill;
+            // Light fills (white/light grey) = libre, dark fills = ocupada
+            const rgb = fill.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)\\)/);
+            if (rgb) {
+                const brightness = (parseInt(rgb[1]) + parseInt(rgb[2]) + parseInt(rgb[3])) / 3;
+                if (brightness >= 150) libre++;
+                else ocupado++;
+            }
+        });
+        return {total: seats.length, libre, ocupado};
+    }""")
 
-    return [{"session_id": "main", "label": title, "date": "",
-             "capacity": total,
-             "sold": result.get("ocupado", 0),
-             "reserved": 0}]
+    print(f"  Color analysis: {result}")
+
+    libre   = result.get("libre", 0)   if result else 0
+    ocupado = result.get("ocupado", 0) if result else 0
+    total   = result.get("total", butaca_count) if result else butaca_count
+
+    # If color analysis fails (all same color), just report total
+    if libre + ocupado == 0:
+        libre = total
+
+    # Extract date/session from page
+    body_text = page.inner_text("body")
+    date_m = re.search(r'\d{1,2}/\d{2}/\d{4}\s+\d{2}:\d{2}', body_text)
+    label = date_m.group(0) if date_m else page.title()
+
+    return [{"session_id": "main", "label": label, "date": "",
+             "capacity": total, "sold": ocupado, "reserved": 0}]
 
 
 SCRAPERS = {
@@ -238,6 +230,8 @@ def main():
                                     "eventVenue": event["venue"], "sessions": sessions})
                     for s in sessions:
                         print(f"  -> {s['label']}: {s['sold']} vendidas / {s['capacity']} aforo")
+                else:
+                    print("  No data")
             except PWTimeout:
                 print("  TIMEOUT")
             except Exception as ex:
@@ -245,7 +239,7 @@ def main():
 
         browser.close()
 
-    print(f"\nSending {len(results)} results to ingest...")
+    print(f"\nSending {len(results)} results...")
     if results:
         r = requests.post(INGEST_URL, json={"results": results}, headers=HEADERS, timeout=15)
         print(f"Ingest: {r.status_code} — {r.text}")
