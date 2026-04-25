@@ -9,6 +9,9 @@ export const dynamic = "force-dynamic";
 
 function formatDate(raw: string): string {
   if (!raw) return "";
+  // Only attempt JS Date parsing on ISO-format strings (YYYY-MM-DD...)
+  // Non-ISO labels (e.g. "Sábado 16 mayo 19:00") are returned as-is
+  if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw;
   try {
     const date = new Date(raw.length <= 10 ? raw + "T00:00" : raw);
     const d = date.toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long", year: "numeric" });

@@ -5,8 +5,28 @@ Findings:
  - bacantix.com:  MCIAjax.aspx response XML — O attr absent=libre, O=201=vendida
  - reservaentradas.com: Angular, need to navigate base→click Butacas step, then count butaca1
 """
-import os, json, re, sys, requests
+import os, json, re, sys, requests, datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05","junio":"06",
+         "julio":"07","agosto":"08","septiembre":"09","octubre":"10","noviembre":"11","diciembre":"12"}
+
+def _parse_es_date(day_s: str, month_s: str, year_s: str | None) -> str:
+    """Return ISO date YYYY-MM-DD from Spanish day/month/year strings."""
+    month = MESES.get(month_s.lower(), "")
+    if not month:
+        return ""
+    day = day_s.zfill(2)
+    if year_s:
+        return f"{year_s}-{month}-{day}"
+    # Infer year: if date already passed this year, use next year
+    today = datetime.date.today()
+    try:
+        candidate = datetime.date(today.year, int(month), int(day))
+        year = today.year if candidate >= today else today.year + 1
+    except ValueError:
+        year = today.year
+    return f"{year}-{month}-{day}"
 
 INGEST_URL    = os.environ.get("INGEST_URL", "")
 INGEST_SECRET = os.environ.get("INGEST_SECRET", "")
@@ -61,13 +81,26 @@ def scrape_todaslasentradas(page, url):
 
     # Extract date/label from page body
     body  = page.inner_text("body")
-    # Pattern: "Sábado 16 mayo 19:00" or "16 mayo 2026 19:00"
-    date_m = re.search(r'(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo)\s+\d+\s+\w+\s+\d{2}:\d{2}', body, re.IGNORECASE)
-    if not date_m:
-        date_m = re.search(r'\d{1,2}\s+(?:de\s+)?\w+\s+(?:de\s+)?\d{4}', body)
-    label = date_m.group(0).strip() if date_m else page.title()
+    # Try with year: "Sábado 16 mayo 2026 19:00"
+    date_m = re.search(
+        r'(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo)\s+(\d+)\s+(\w+)\s+(\d{4})\s+(\d{2}:\d{2})',
+        body, re.IGNORECASE)
+    if date_m:
+        date_iso = _parse_es_date(date_m.group(1), date_m.group(2), date_m.group(3))
+        label    = f"{date_iso}T{date_m.group(4)}" if date_iso else date_m.group(0).strip()
+    else:
+        # No year: "Sábado 16 mayo 19:00"
+        date_m2 = re.search(
+            r'(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo)\s+(\d+)\s+(\w+)\s+(\d{2}:\d{2})',
+            body, re.IGNORECASE)
+        if date_m2:
+            date_iso = _parse_es_date(date_m2.group(1), date_m2.group(2), None)
+            label    = f"{date_iso}T{date_m2.group(3)}" if date_iso else date_m2.group(0).strip()
+        else:
+            date_iso = ""
+            label    = page.title()
 
-    return [{"session_id": "main", "label": label, "date": "",
+    return [{"session_id": "main", "label": label, "date": date_iso,
              "capacity": total, "sold": ocupada, "reserved": 0}]
 
 
@@ -116,12 +149,19 @@ def scrape_bacantix(page, url):
         print("  No seat data found in MCIAjax")
         return []
 
-    # Extract date from body text
+    # Extract date from body text: "viernes, 27 noviembre 2026"
     body_text = page.inner_text("body")
-    date_m = re.search(r'(?:lunes|martes|miércoles|jueves|viernes|sábado|domingo)[,\s]+\d+\s+\w+\s+\d{4}', body_text, re.IGNORECASE)
-    label = date_m.group(0).strip() if date_m else page.title()
+    date_m = re.search(
+        r'(?:lunes|martes|miércoles|jueves|viernes|sábado|domingo)[,\s]+(\d+)\s+(\w+)\s+(\d{4})',
+        body_text, re.IGNORECASE)
+    if date_m:
+        date_iso = _parse_es_date(date_m.group(1), date_m.group(2), date_m.group(3))
+        label    = f"{date_iso}" if date_iso else date_m.group(0).strip()
+    else:
+        date_iso = ""
+        label    = page.title()
 
-    return [{"session_id": "main", "label": label, "date": "",
+    return [{"session_id": "main", "label": date_iso or label, "date": date_iso,
              "capacity": total, "sold": sold, "reserved": 0}]
 
 
