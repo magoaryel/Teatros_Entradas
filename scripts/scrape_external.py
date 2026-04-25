@@ -125,6 +125,78 @@ def scrape_bacantix(page, url):
              "capacity": total, "sold": sold, "reserved": 0}]
 
 
+# ── auditoriocartuja.com ─────────────────────────────────────────────────────
+# Uses Janto ticketing: apiw5.janto.es/v5/sessions/{code}/full/01
+# Event code (e.g. A291026HIPNOSTIS) is embedded in the page HTML
+
+def scrape_auditoriocartuja(page, url):
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        html = resp.text
+    except Exception as e:
+        print(f"  HTTP error: {e}")
+        return []
+
+    # Try Janto API URL pattern first, then standalone code pattern
+    code_m = re.search(r'apiw5\.janto\.es/[^/]+/sessions/([A-Z0-9]+)', html)
+    if not code_m:
+        code_m = re.search(r'["\'/]([A-Z]\d{6}[A-Z]{2,})["\'/]', html)
+    if not code_m:
+        print("  Janto event code not found in page")
+        return []
+
+    event_code = code_m.group(1)
+    print(f"  Janto event code: {event_code}")
+
+    try:
+        jr = requests.get(
+            f"https://apiw5.janto.es/v5/sessions/{event_code}/full/01",
+            timeout=15
+        )
+        jr.raise_for_status()
+        data = jr.json()
+    except Exception as e:
+        print(f"  Janto API error: {e}")
+        return []
+
+    sessions = data if isinstance(data, list) else [data]
+    results = []
+    for s in sessions:
+        mt        = s.get("maxTickets") or {}
+        available = mt.get("availableTickets", 0)
+        pct_avail = float(s.get("percentAvailable", 1.0))
+
+        # total = available / percentAvailable  (e.g. 499 / 0.998 ≈ 500)
+        if 0 < pct_avail < 1:
+            total = round(available / pct_avail)
+        else:
+            total = available
+
+        sold = max(0, total - available)
+
+        raw = str(s.get("sessionDate", ""))
+        if len(raw) >= 12:
+            label    = f"{raw[6:8]}/{raw[4:6]}/{raw[:4]} {raw[8:10]}:{raw[10:12]}"
+            date_iso = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+        else:
+            label    = raw or page.title() if hasattr(page, "title") else raw
+            date_iso = ""
+
+        session_id = str(s.get("sessionId") or s.get("sessionDate") or "main")
+        print(f"  Session {label}: available={available}, total={total}, sold={sold}")
+
+        results.append({
+            "session_id": session_id,
+            "label":      label,
+            "date":       date_iso,
+            "capacity":   total,
+            "sold":       sold,
+            "reserved":   0,
+        })
+
+    return results
+
+
 # ── reservaentradas.com ───────────────────────────────────────────────────────
 # Angular app — must load base URL then click "Butacas" step to render seat map
 # butaca1 elements: count by computed fill color
@@ -177,9 +249,10 @@ def scrape_reservaentradas(_, url):
 
 
 SCRAPERS = {
-    "todaslasentradas": scrape_todaslasentradas,
-    "bacantix":         scrape_bacantix,
-    "reservaentradas":  scrape_reservaentradas,
+    "todaslasentradas":  scrape_todaslasentradas,
+    "bacantix":          scrape_bacantix,
+    "reservaentradas":   scrape_reservaentradas,
+    "auditoriocartuja":  scrape_auditoriocartuja,
 }
 
 
