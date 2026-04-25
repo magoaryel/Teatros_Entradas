@@ -400,10 +400,12 @@ def scrape_reservaentradas(page, url):
 def _reserva_label(page):
     try:
         body = page.inner_text("body")
-        m = re.search(r'\d{1,2}/\d{2}/\d{4}\s+\d{2}:\d{2}', body)
-        return m.group(0) if m else page.title()
+        m = re.search(r'(\d{1,2})/(\d{2})/(\d{4})\s+(\d{2}:\d{2})', body)
+        if m:
+            return f"{m.group(3)}-{m.group(2)}-{m.group(1).zfill(2)}T{m.group(4)}"
+        return page.title()
     except:
-        return "30/05/2026 20:00"
+        return "2026-05-30T20:00"
 
 
 SCRAPERS = {
