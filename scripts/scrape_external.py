@@ -357,11 +357,51 @@ def scrape_reservaentradas(_, url):
              "capacity": aforo, "sold": sold, "reserved": 0}]
 
 
+# ── ctickets.es ──────────────────────────────────────────────────────────────
+# Fully server-rendered HTML — no JS needed.
+# Zones with class="zonacompleta" are sold out; the rest are available.
+# No per-seat count available — we track sold/available zones.
+
+def scrape_ctickets(_, url):
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        html = resp.text
+    except Exception as e:
+        print(f"  HTTP error: {e}")
+        return []
+
+    # Count all zone rows (have a radio input) and sold-out ones (class="zonacompleta")
+    total_zones = len(re.findall(r'<input[^>]+radioZona[^>]*/>', html))
+    sold_zones  = len(re.findall(r'<tr\s+class="zonacompleta"', html))
+    avail_zones = total_zones - sold_zones
+    print(f"  zonas total={total_zones}, agotadas={sold_zones}, disponibles={avail_zones}")
+
+    if total_zones == 0:
+        print("  No zone data found")
+        return []
+
+    # Extract date from JSON-LD or page text
+    date_iso = ""
+    label    = ""
+    jld_m = re.search(r'"startDate"\s*:\s*"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})', html)
+    if jld_m:
+        date_iso = jld_m.group(1)
+        label    = f"{date_iso}T{jld_m.group(2)}"
+
+    # Session ID from URL (the numeric event ID)
+    sid_m = re.search(r'/(\d+)(?:/|$)', url)
+    session_id = sid_m.group(1) if sid_m else "main"
+
+    return [{"session_id": session_id, "label": label, "date": date_iso,
+             "capacity": total_zones, "sold": sold_zones, "reserved": 0}]
+
+
 SCRAPERS = {
     "todaslasentradas":  scrape_todaslasentradas,
     "bacantix":          scrape_bacantix,
     "reservaentradas":   scrape_reservaentradas,
     "auditoriocartuja":  scrape_auditoriocartuja,
+    "ctickets":          scrape_ctickets,
 }
 
 
