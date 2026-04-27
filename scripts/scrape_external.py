@@ -105,7 +105,11 @@ def scrape_todaslasentradas(page, url):
 
 
 # ── bacantix.com ──────────────────────────────────────────────────────────────
-# MCIAjax.aspx XML: no O attr = libre, O="201" = vendida, O="90" = discapacitados (skip)
+# MCIAjax.aspx XML contains:
+#   <I id="N" O="orientation" .../> — one per seat; O = rotation, NOT state
+#   <E Estados="111311..."/>        — compact string; position N = state of seat id N
+#                                     '1'=libre, anything else = vendida/bloqueada
+# Source: reverse-engineered from Control.js MapeaEstados() function.
 
 def scrape_bacantix(page, url):
     mci_body = []
@@ -131,19 +135,32 @@ def scrape_bacantix(page, url):
         return []
 
     body = mci_body[0]
-    # Count numeric-id <I> elements by O attribute
-    all_seats = re.findall(r'<I id="(\d+)"([^/]*)/>', body)
+
+    # Get seat IDs from <I id="N" .../> elements
+    seat_ids = [int(i) for i in re.findall(r'<I id="(\d+)"', body)]
+
+    # Get the Estados string from <E Estados="..."/>
+    estados_m = re.search(r'<E\s[^>]*Estados="([^"]*)"', body)
+    if not estados_m:
+        print("  <E Estados=...> not found in MCIAjax")
+        # Fallback: log sample XML for debugging
+        print(f"  XML sample: {body[:300]}")
+        return []
+
+    estados = estados_m.group(1)
+    print(f"  Estados string length={len(estados)}, seats={len(seat_ids)}")
+
     libre = sold = 0
-    for _, attrs in all_seats:
-        o = re.search(r'O="(\d+)"', attrs)
-        if not o:
-            libre += 1       # no O attribute = available
-        elif o.group(1) == "201":
-            sold += 1        # O=201 = sold/occupied
-        # O=90 = disabled spaces, skip
+    for sid in seat_ids:
+        if sid < len(estados):
+            state = estados[sid]
+            if state == "1":
+                libre += 1
+            elif state not in ("0", ""):  # 0 = uninitialized/no-seat, skip
+                sold += 1
 
     total = libre + sold
-    print(f"  Libre={libre}, Vendidas(O=201)={sold}, Total={total}")
+    print(f"  Libre={libre}, Vendidas={sold}, Total={total}")
 
     if total == 0:
         print("  No seat data found in MCIAjax")
