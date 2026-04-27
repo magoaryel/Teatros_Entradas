@@ -358,42 +358,105 @@ def scrape_reservaentradas(_, url):
 
 
 # ── ctickets.es ──────────────────────────────────────────────────────────────
-# Fully server-rendered HTML — no JS needed.
-# Zones with class="zonacompleta" are sold out; the rest are available.
-# No per-seat count available — we track sold/available zones.
+# Page is server-rendered. Zone list shows which zones are "completo".
+# Per-seat counts need Playwright: click an available zone → form submits →
+# next page shows seat map. Intercept AJAX or count seat elements in DOM.
 
-def scrape_ctickets(_, url):
-    try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        html = resp.text
-    except Exception as e:
-        print(f"  HTTP error: {e}")
+def scrape_ctickets(page, url):
+    ajax_bodies = []
+
+    def on_response(resp):
+        if "ctickets.es" in resp.url and resp.request.resource_type in ("xhr", "fetch", "document"):
+            try:
+                body = resp.body().decode("utf-8", errors="replace")
+                if len(body) > 200:   # ignore tiny pings
+                    ajax_bodies.append((resp.url, body))
+            except: pass
+
+    page.on("response", on_response)
+    page.goto(url, timeout=30000)
+    page.wait_for_load_state("networkidle", timeout=20000)
+
+    html = page.content()
+
+    # ── Collect zone IDs ──────────────────────────────────────────────────────
+    avail_ids  = re.findall(r'<input[^>]+radioZona[^>]+value="(\d+)"', html)
+    sold_zones = len(re.findall(r'<tr\s+class="zonacompleta"', html))
+    total_zones = len(avail_ids) + sold_zones
+    print(f"  zonas disponibles={len(avail_ids)}, agotadas={sold_zones}, total={total_zones}")
+
+    # ── Try clicking first available zone and submitting ──────────────────────
+    seat_total = seat_avail = 0
+    if avail_ids:
+        try:
+            zone_id = avail_ids[0]
+            page.click(f"input#id_{zone_id}")
+            page.wait_for_timeout(500)
+            # Submit form — look for Continuar / Comprar button
+            for btn_sel in ['input[type="submit"]', 'button[type="submit"]',
+                            'button:has-text("Continuar")', 'button:has-text("Comprar")']:
+                btn = page.query_selector(btn_sel)
+                if btn and btn.is_visible():
+                    btn.click()
+                    break
+            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_timeout(3000)
+
+            # Look for seat elements in the resulting page
+            seat_data = page.evaluate("""() => {
+                // Common ctickets seat classes: butaca-libre, butaca-ocupada, butaca-reservada
+                const libre   = document.querySelectorAll('[class*="libre"]:not([class*="leyenda"])').length;
+                const ocupada = document.querySelectorAll('[class*="ocupada"]:not([class*="leyenda"]), [class*="reservada"]:not([class*="leyenda"])').length;
+                // Fallback: any SVG or img with seat-like IDs
+                const allSeats = document.querySelectorAll('[id^="butaca_"], [id^="seat_"], [class*="butaca"]:not([class*="leyenda"])').length;
+                return {libre, ocupada, allSeats};
+            }""")
+            print(f"  seat DOM: libre={seat_data['libre']}, ocupada={seat_data['ocupada']}, allSeats={seat_data['allSeats']}")
+            seat_avail = seat_data["libre"]
+            seat_total = seat_data["libre"] + seat_data["ocupada"]
+            if seat_total == 0:
+                seat_total = seat_data["allSeats"]
+        except Exception as e:
+            print(f"  seat map error: {e}")
+
+    # ── Also check AJAX responses for seat counts ─────────────────────────────
+    for api_url, body in ajax_bodies:
+        print(f"  AJAX: {api_url[-70:]}")
+        # Look for JSON with seat counts
+        try:
+            d = json.loads(body)
+            for key in ("disponibles", "libres", "total", "aforo", "vendidas"):
+                if key in d:
+                    print(f"    {key}={d[key]}")
+        except: pass
+
+    # ── Use seat-level data if available, otherwise fall back to zones ────────
+    if seat_total > 0:
+        sold = seat_total - seat_avail
+        capacity = seat_total
+        print(f"  Using seat data: total={capacity}, sold={sold}")
+    else:
+        # Fallback: zone-level (sold_zones = complete zones, total_zones = all zones)
+        capacity = total_zones
+        sold = sold_zones
+        print(f"  Fallback zone data: total={capacity}, sold={sold}")
+
+    if capacity == 0:
+        print("  No data found")
         return []
 
-    # Count all zone rows (have a radio input) and sold-out ones (class="zonacompleta")
-    total_zones = len(re.findall(r'<input[^>]+radioZona[^>]*/>', html))
-    sold_zones  = len(re.findall(r'<tr\s+class="zonacompleta"', html))
-    avail_zones = total_zones - sold_zones
-    print(f"  zonas total={total_zones}, agotadas={sold_zones}, disponibles={avail_zones}")
-
-    if total_zones == 0:
-        print("  No zone data found")
-        return []
-
-    # Extract date from JSON-LD or page text
-    date_iso = ""
-    label    = ""
+    # Date from JSON-LD
+    date_iso = label = ""
     jld_m = re.search(r'"startDate"\s*:\s*"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})', html)
     if jld_m:
         date_iso = jld_m.group(1)
         label    = f"{date_iso}T{jld_m.group(2)}"
 
-    # Session ID from URL (the numeric event ID)
     sid_m = re.search(r'/(\d+)(?:/|$)', url)
     session_id = sid_m.group(1) if sid_m else "main"
 
     return [{"session_id": session_id, "label": label, "date": date_iso,
-             "capacity": total_zones, "sold": sold_zones, "reserved": 0}]
+             "capacity": capacity, "sold": sold, "reserved": 0}]
 
 
 SCRAPERS = {
