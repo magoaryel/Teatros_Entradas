@@ -36,6 +36,7 @@ function cleanTicketUrl(url: string): string {
   clean = clean.replace(/[&?]_gl=[^&]*/g, "");
   clean = clean.replace(/[&?]_gcl_[^=]+=[^&]*/g, "");
   clean = clean.replace(/[&?]utm_[^=]+=[^&]*/g, "");
+  clean = clean.replace(/[&?]fbclid=[^&]*/g, "");
   // Clean trailing ? or &
   clean = clean.replace(/[?&]$/, "");
   return clean;

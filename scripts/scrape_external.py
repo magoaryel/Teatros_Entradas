@@ -402,14 +402,17 @@ def scrape_ctickets(page, url):
     total_zones = len(avail_ids) + sold_zones
     print(f"  zonas disponibles={len(avail_ids)}, agotadas={sold_zones}, total={total_zones}")
 
-    # ── Try clicking first available zone and submitting ──────────────────────
+    # ── Click each available zone and sum seats across all of them ───────────
     seat_total = seat_avail = 0
-    if avail_ids:
+    all_zone_ids = avail_ids  # only click available zones; sold-out ones have no seat map
+
+    for zone_id in all_zone_ids:
         try:
-            zone_id = avail_ids[0]
+            # Navigate back to the event page to re-select a zone
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
             page.click(f"input#id_{zone_id}")
             page.wait_for_timeout(500)
-            # Submit form — look for Continuar / Comprar button
             for btn_sel in ['input[type="submit"]', 'button[type="submit"]',
                             'button:has-text("Continuar")', 'button:has-text("Comprar")']:
                 btn = page.query_selector(btn_sel)
@@ -417,46 +420,29 @@ def scrape_ctickets(page, url):
                     btn.click()
                     break
             page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(2000)
 
-            # Look for seat elements in the resulting page
             seat_data = page.evaluate("""() => {
-                // Common ctickets seat classes: butaca-libre, butaca-ocupada, butaca-reservada
                 const libre   = document.querySelectorAll('[class*="libre"]:not([class*="leyenda"])').length;
                 const ocupada = document.querySelectorAll('[class*="ocupada"]:not([class*="leyenda"]), [class*="reservada"]:not([class*="leyenda"])').length;
-                // Fallback: any SVG or img with seat-like IDs
-                const allSeats = document.querySelectorAll('[id^="butaca_"], [id^="seat_"], [class*="butaca"]:not([class*="leyenda"])').length;
-                return {libre, ocupada, allSeats};
+                return {libre, ocupada};
             }""")
-            print(f"  seat DOM: libre={seat_data['libre']}, ocupada={seat_data['ocupada']}, allSeats={seat_data['allSeats']}")
-            seat_avail = seat_data["libre"]
-            seat_total = seat_data["libre"] + seat_data["ocupada"]
-            if seat_total == 0:
-                seat_total = seat_data["allSeats"]
+            z_total = seat_data["libre"] + seat_data["ocupada"]
+            print(f"  Zona {zone_id}: libre={seat_data['libre']}, ocupada={seat_data['ocupada']}")
+            seat_avail += seat_data["libre"]
+            seat_total += z_total
         except Exception as e:
-            print(f"  seat map error: {e}")
+            print(f"  Zona {zone_id} error: {e}")
 
-    # ── Also check AJAX responses for seat counts ─────────────────────────────
-    for api_url, body in ajax_bodies:
-        print(f"  AJAX: {api_url[-70:]}")
-        # Look for JSON with seat counts
-        try:
-            d = json.loads(body)
-            for key in ("disponibles", "libres", "total", "aforo", "vendidas"):
-                if key in d:
-                    print(f"    {key}={d[key]}")
-        except: pass
+    # Sold-out zones: we know all seats are sold, but don't know the count
+    # (can't click their radio — they have no radio button, they're <tr class="zonacompleta">)
+    # So seat_total is only from available zones. We still report it.
 
     # ── Use seat-level data if available, otherwise fall back to zones ────────
     if seat_total > 0:
         sold = seat_total - seat_avail
         capacity = seat_total
-        print(f"  Using seat data: total={capacity}, sold={sold}")
-    else:
-        # Fallback: zone-level (sold_zones = complete zones, total_zones = all zones)
-        capacity = total_zones
-        sold = sold_zones
-        print(f"  Fallback zone data: total={capacity}, sold={sold}")
+        print(f"  Seat data (available zones only): total={capacity}, sold={sold}")
 
     if capacity == 0:
         print("  No data found")
