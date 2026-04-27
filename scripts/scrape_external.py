@@ -156,11 +156,12 @@ def scrape_bacantix(page, url):
             state = estados[sid]
             if state == "1":
                 libre += 1
-            elif state not in ("0", ""):  # 0 = uninitialized/no-seat, skip
+            elif state == "3":   # E=3 = Venta (sold) — shown RED on seat map
                 sold += 1
+            # E=2 bloqueado, E=4 protocolo, E=14 exclusión → skip (admin holds, not sold)
 
     total = libre + sold
-    print(f"  Libre={libre}, Vendidas={sold}, Total={total}")
+    print(f"  Libre={libre}, Vendidas(E=3)={sold}, Total={total}")
 
     if total == 0:
         print("  No seat data found in MCIAjax")
