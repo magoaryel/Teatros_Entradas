@@ -103,7 +103,10 @@ export default async function Dashboard() {
           </div>
 
           {eventData.map(event => {
-            const totalSold = event.sessions.reduce((s, sess) => s + (sess.sold ?? 0), 0);
+            const totalSold = event.sessions.reduce((s, sess) => {
+              const real = Math.max(0, (sess.sold ?? 0) - (sess.sold_baseline ?? 0));
+              return s + real;
+            }, 0);
             const totalCap  = event.sessions.reduce((s, sess) => s + (sess.total_capacity ?? 0), 0);
 
             return (
@@ -153,9 +156,11 @@ export default async function Dashboard() {
                   </div>
                 ) : (
                   event.sessions.map((sess, idx) => {
-                    const sold  = sess.sold ?? 0;
+                    const baseline = sess.sold_baseline ?? 0;
+                    const sold  = Math.max(0, (sess.sold ?? 0) - baseline);
                     const cap   = sess.total_capacity ?? 0;
-                    const avail = sess.available ?? Math.max(0, cap - sold);
+                    const reserved = sess.reserved ?? 0;
+                    const avail = Math.max(0, cap - sold - reserved);
                     const pct   = cap > 0 ? Math.round((sold / cap) * 100) : 0;
 
                     return (

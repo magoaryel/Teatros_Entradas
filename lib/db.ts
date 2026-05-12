@@ -24,6 +24,7 @@ export interface Session {
   reserved: number | null;
   available: number | null;
   last_check: string | null;
+  sold_baseline: number | null;  // sold count from first snapshot — subtract to get real sales
 }
 
 export interface Snapshot {
@@ -173,10 +174,15 @@ export async function getLatestSnapshot(sessionId: number) {
 export async function getEventSessions(eventId: number): Promise<Session[]> {
   const db = sql();
   return db`
-    SELECT s.*, snap.sold, snap.reserved, snap.available, snap.captured_at AS last_check
+    SELECT s.*,
+      snap.sold, snap.reserved, snap.available, snap.captured_at AS last_check,
+      COALESCE((
+        SELECT sold FROM snapshots WHERE session_id = s.id ORDER BY captured_at ASC LIMIT 1
+      ), 0) AS sold_baseline
     FROM sessions s
     LEFT JOIN LATERAL (
-      SELECT * FROM snapshots WHERE session_id = s.id ORDER BY captured_at DESC LIMIT 1
+      SELECT sold, reserved, available, captured_at
+      FROM snapshots WHERE session_id = s.id ORDER BY captured_at DESC LIMIT 1
     ) snap ON true
     WHERE s.event_id = ${eventId}
     ORDER BY s.session_date
