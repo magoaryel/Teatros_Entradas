@@ -185,6 +185,7 @@ export async function getEventSessions(eventId: number): Promise<Session[]> {
       FROM snapshots WHERE session_id = s.id ORDER BY captured_at DESC LIMIT 1
     ) snap ON true
     WHERE s.event_id = ${eventId}
+      AND (s.session_date IS NULL OR s.session_date >= to_char(NOW(), 'YYYY-MM-DD'))
     ORDER BY s.session_date
   ` as unknown as Promise<Session[]>;
 }
