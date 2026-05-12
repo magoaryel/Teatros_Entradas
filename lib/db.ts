@@ -59,6 +59,7 @@ export async function initDb() {
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS page_url TEXT`;
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS has_tickets BOOLEAN DEFAULT false`;
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS show_date TEXT`;
+  await db`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sold_baseline INTEGER`;
   await db`
     CREATE TABLE IF NOT EXISTS sessions (
       id SERIAL PRIMARY KEY,
@@ -160,6 +161,11 @@ export async function saveSnapshot(
     INSERT INTO snapshots (session_id, sold, reserved, available)
     VALUES (${sessionId}, ${sold}, ${reserved}, ${available})
   `;
+  // Set baseline on first save (NULL = never set). This persists across code changes.
+  await db`
+    UPDATE sessions SET sold_baseline = ${sold}
+    WHERE id = ${sessionId} AND sold_baseline IS NULL
+  `;
 }
 
 export async function getLatestSnapshot(sessionId: number) {
@@ -176,9 +182,7 @@ export async function getEventSessions(eventId: number): Promise<Session[]> {
   return db`
     SELECT s.*,
       snap.sold, snap.reserved, snap.available, snap.captured_at AS last_check,
-      COALESCE((
-        SELECT sold FROM snapshots WHERE session_id = s.id ORDER BY captured_at ASC LIMIT 1
-      ), 0) AS sold_baseline
+      COALESCE(s.sold_baseline, 0) AS sold_baseline
     FROM sessions s
     LEFT JOIN LATERAL (
       SELECT sold, reserved, available, captured_at
