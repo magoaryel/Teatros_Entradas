@@ -103,8 +103,12 @@ export default async function Dashboard() {
           </div>
 
           {eventData.map(event => {
+            // Baseline subtraction only for ctickets: admin blocks show as "ocupada" from day 1.
+            // All other platforms already return real sales in their sold count.
+            const useBaseline = event.platform === "ctickets";
             const totalSold = event.sessions.reduce((s, sess) => {
-              const real = Math.max(0, (sess.sold ?? 0) - (sess.sold_baseline ?? 0));
+              const baseline = useBaseline ? (sess.sold_baseline ?? 0) : 0;
+              const real = Math.max(0, (sess.sold ?? 0) - baseline);
               return s + real;
             }, 0);
             const totalCap  = event.sessions.reduce((s, sess) => s + (sess.total_capacity ?? 0), 0);
@@ -156,7 +160,7 @@ export default async function Dashboard() {
                   </div>
                 ) : (
                   event.sessions.map((sess, idx) => {
-                    const baseline = sess.sold_baseline ?? 0;
+                    const baseline = useBaseline ? (sess.sold_baseline ?? 0) : 0;
                     const sold  = Math.max(0, (sess.sold ?? 0) - baseline);
                     const cap   = sess.total_capacity ?? 0;
                     const reserved = sess.reserved ?? 0;
