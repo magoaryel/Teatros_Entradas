@@ -57,7 +57,7 @@ def get_active_events():
 def scrape_todaslasentradas(page, url):
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(5000)  # extra wait — page has JS queue + dynamic rendering
 
     # Try Palco4 arraySesiones (same platform family)
     raw = page.evaluate("typeof arraySesiones !== 'undefined' ? JSON.stringify(arraySesiones) : null")
@@ -74,6 +74,26 @@ def scrape_todaslasentradas(page, url):
     ocupada = len(page.query_selector_all("[class*='mapaOcupada']"))
     total   = libre + ocupada
     print(f"  mapaLibre={libre}, mapaOcupada={ocupada}")
+
+    # Debug: if still 0, log what's on the page to diagnose
+    if total == 0:
+        page_url   = page.url
+        page_title = page.title()
+        print(f"  Page URL after load: {page_url}")
+        print(f"  Page title: {page_title}")
+        rel_classes = page.evaluate("""() => {
+            const s = new Set();
+            document.querySelectorAll('[class]').forEach(e => {
+                (e.getAttribute('class') || '').split(' ').forEach(c => {
+                    if (c && (c.includes('mapa') || c.includes('asiento') ||
+                              c.includes('butaca') || c.includes('sesion') ||
+                              c.includes('queue') || c.includes('waiting')))
+                        s.add(c);
+                });
+            });
+            return [...s].slice(0, 30);
+        }""")
+        print(f"  Relevant classes on page: {rel_classes}")
 
     if total == 0:
         print("  No seat data found")
@@ -398,52 +418,86 @@ def scrape_ctickets(page, url):
     html = page.content()
 
     # ── Collect zone IDs ──────────────────────────────────────────────────────
-    avail_ids  = re.findall(r'<input[^>]+radioZona[^>]+value="(\d+)"', html)
-    sold_zones = len(re.findall(r'<tr\s+class="zonacompleta"', html))
-    total_zones = len(avail_ids) + sold_zones
-    print(f"  zonas disponibles={len(avail_ids)}, agotadas={sold_zones}, total={total_zones}")
+    avail_ids = re.findall(r'<input[^>]+radioZona[^>]+value="(\d+)"', html)
 
-    # ── Click each available zone and sum seats across all of them ───────────
-    seat_total = seat_avail = 0
-    all_zone_ids = avail_ids  # only click available zones; sold-out ones have no seat map
+    # Sold-out zones have no radio button but <label for="id_XXXXX"> reveals the ID
+    sold_ids = []
+    for m in re.finditer(r'class=["\']?zonacompleta["\']?', html):
+        snippet  = html[m.start():m.start() + 600]
+        label_m  = re.search(r'<label\s+for="id_(\d+)"', snippet)
+        if label_m:
+            sold_ids.append(label_m.group(1))
 
-    for zone_id in all_zone_ids:
-        try:
-            # Navigate back to the event page to re-select a zone
-            page.goto(url, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=20000)
+    total_zones = len(avail_ids) + len(sold_ids)
+    print(f"  zonas disponibles={len(avail_ids)}, agotadas={len(sold_ids)}, total={total_zones}")
+
+    def _navigate_zone(zone_id, is_sold_out=False):
+        """Navigate to a zone seat map and return {libre, ocupada}."""
+        page.goto(url, timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+        if is_sold_out:
+            # No radio button — inject a hidden input with the zone ID
+            page.evaluate(f"""
+                (() => {{
+                    const form = document.getElementById('reserva-entradas');
+                    if (!form) return;
+                    const inp = document.createElement('input');
+                    inp.type  = 'hidden';
+                    inp.name  = 'data[ZonaRecintoSesion][id]';
+                    inp.value = '{zone_id}';
+                    form.appendChild(inp);
+                }})()
+            """)
+            page.wait_for_timeout(300)
+        else:
             page.click(f"input#id_{zone_id}")
             page.wait_for_timeout(500)
-            for btn_sel in ['input[type="submit"]', 'button[type="submit"]',
-                            'button:has-text("Continuar")', 'button:has-text("Comprar")']:
-                btn = page.query_selector(btn_sel)
-                if btn and btn.is_visible():
-                    btn.click()
-                    break
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(2000)
+        for btn_sel in ['input[type="submit"]', 'button[type="submit"]',
+                        'button:has-text("Continuar")', 'button:has-text("Comprar")']:
+            btn = page.query_selector(btn_sel)
+            if btn and btn.is_visible():
+                btn.click()
+                break
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(2000)
+        return page.evaluate("""() => {
+            const libre   = document.querySelectorAll('[class*="libre"]:not([class*="leyenda"])').length;
+            const ocupada = document.querySelectorAll('[class*="ocupada"]:not([class*="leyenda"]), [class*="reservada"]:not([class*="leyenda"])').length;
+            return {libre, ocupada};
+        }""")
 
-            seat_data = page.evaluate("""() => {
-                const libre   = document.querySelectorAll('[class*="libre"]:not([class*="leyenda"])').length;
-                const ocupada = document.querySelectorAll('[class*="ocupada"]:not([class*="leyenda"]), [class*="reservada"]:not([class*="leyenda"])').length;
-                return {libre, ocupada};
-            }""")
-            z_total = seat_data["libre"] + seat_data["ocupada"]
-            print(f"  Zona {zone_id}: libre={seat_data['libre']}, ocupada={seat_data['ocupada']}")
-            seat_avail += seat_data["libre"]
+    # ── Click each available zone and sum seats ───────────────────────────────
+    seat_total = seat_avail = 0
+
+    for zone_id in avail_ids:
+        try:
+            d = _navigate_zone(zone_id, is_sold_out=False)
+            z_total = d["libre"] + d["ocupada"]
+            print(f"  Zona {zone_id}: libre={d['libre']}, ocupada={d['ocupada']}")
+            seat_avail += d["libre"]
             seat_total += z_total
         except Exception as e:
             print(f"  Zona {zone_id} error: {e}")
 
-    # Sold-out zones: we know all seats are sold, but don't know the count
-    # (can't click their radio — they have no radio button, they're <tr class="zonacompleta">)
-    # So seat_total is only from available zones. We still report it.
+    # ── Try sold-out zones — inject zone ID; server may still serve the seat map ──
+    for zone_id in sold_ids:
+        try:
+            d = _navigate_zone(zone_id, is_sold_out=True)
+            z_total = d["libre"] + d["ocupada"]
+            print(f"  Zona {zone_id} (agotada): libre={d['libre']}, ocupada={d['ocupada']}")
+            if z_total > 0:
+                seat_avail += d["libre"]
+                seat_total += z_total
+            else:
+                print(f"  Zona {zone_id} (agotada): servidor no devuelve mapa, zona ignorada")
+        except Exception as e:
+            print(f"  Zona {zone_id} (agotada) error: {e}")
 
-    # ── Use seat-level data if available, otherwise fall back to zones ────────
-    if seat_total > 0:
-        sold = seat_total - seat_avail
-        capacity = seat_total
-        print(f"  Seat data (available zones only): total={capacity}, sold={sold}")
+    # ── Compute totals ────────────────────────────────────────────────────────
+    capacity = seat_total
+    sold     = seat_total - seat_avail
+    counted  = len(avail_ids)  # agotadas only added if server returned a seat map
+    print(f"  Seat data ({counted} zonas disponibles + agotadas con mapa): total={capacity}, sold={sold}")
 
     if capacity == 0:
         print("  No data found")
