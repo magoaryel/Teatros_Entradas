@@ -2,12 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getActiveEvents } from "@/lib/db";
 import { runScrapeForEvent } from "@/lib/runScrape";
 
-export async function GET(req: NextRequest) {
-  const secret = req.headers.get("authorization")?.replace("Bearer ", "");
-  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export async function GET(_req: NextRequest) {
   const events = await getActiveEvents();
   const results = [];
 
