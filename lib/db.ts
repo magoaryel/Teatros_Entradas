@@ -41,7 +41,10 @@ function sql() {
   return neon(process.env.DATABASE_URL);
 }
 
+let _initialized = false;
 export async function initDb() {
+  if (_initialized) return;
+  _initialized = true;
   const db = sql();
   await db`
     CREATE TABLE IF NOT EXISTS events (
