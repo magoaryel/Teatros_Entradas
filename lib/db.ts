@@ -59,7 +59,6 @@ export async function initDb() {
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS page_url TEXT`;
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS has_tickets BOOLEAN DEFAULT false`;
   await db`ALTER TABLE events ADD COLUMN IF NOT EXISTS show_date TEXT`;
-  await db`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sold_baseline INTEGER`;
   await db`
     CREATE TABLE IF NOT EXISTS sessions (
       id SERIAL PRIMARY KEY,
@@ -71,6 +70,7 @@ export async function initDb() {
       UNIQUE(event_id, session_id)
     )
   `;
+  await db`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sold_baseline INTEGER`;
   await db`
     CREATE TABLE IF NOT EXISTS snapshots (
       id SERIAL PRIMARY KEY,
