@@ -517,12 +517,120 @@ def scrape_ctickets(page, url):
              "capacity": capacity, "sold": sold, "reserved": 0}]
 
 
+
+# ── patronbase.com ────────────────────────────────────────────────────────────
+# Server-rendered HTML — no Playwright needed.
+# Seat classes: pb_pyos_free (available), pb_pyos_held (blocked/sold).
+# pb_pyos_held includes admin invitation blocks → needs sold_baseline like ctickets.
+# URL format: https://es.patronbase.com/_VENUE/Sections/Choose?prod_id=X&perf_id=Y&submit=Continuar
+
+def scrape_patronbase(_, url):
+    from urllib.parse import urlparse, parse_qs
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept-Language": "es-ES,es;q=0.9",
+    }
+
+    parsed     = urlparse(url)
+    venue_path = parsed.path.strip("/").split("/")[0]   # e.g. "_AuditorioBaranain"
+    params     = parse_qs(parsed.query)
+    prod_id    = params.get("prod_id", [""])[0]
+    perf_id    = params.get("perf_id", ["1"])[0]
+    base_url   = f"{parsed.scheme}://{parsed.netloc}"
+
+    if not prod_id:
+        print("  Could not extract prod_id from URL")
+        return []
+
+    # Fetch the sections page to discover section_id and seat types
+    sections_url = f"{base_url}/{venue_path}/Sections/Choose?prod_id={prod_id}&perf_id={perf_id}&submit=Continuar"
+    try:
+        html = requests.get(sections_url, headers=headers, timeout=15).text
+    except Exception as e:
+        print(f"  HTTP error fetching sections: {e}")
+        return []
+
+    section_id_m = re.search(r"section_id=['\"](\w+)['\"]", html)
+    section_id   = section_id_m.group(1) if section_id_m else "PLAT"
+
+    # Extract (code, display_name) for each seat type — skip SR (wheelchair)
+    seat_types = []
+    for div_m in re.finditer(r"<div class='seattype[^>]*>([\s\S]*?)</div>", html):
+        div_html = div_m.group(1)
+        val_m    = re.search(r"value=['\"](\w+)['\"]", div_html)
+        if not val_m:
+            continue
+        code   = val_m.group(1)
+        name_m = re.search(r"/>\s*([\w\s\-áéíóúÁÉÍÓÚñÑ]+?)\s*</label>", div_html, re.DOTALL)
+        name   = name_m.group(1).strip() if name_m else code
+        if code != "SR":
+            seat_types.append((code, name))
+
+    print(f"  section_id={section_id}, seat_types={seat_types}")
+    if not seat_types:
+        print("  No seat types found")
+        return []
+
+    # Abbreviated month mapping ("nov" → "11")
+    MESES_ABREV = {k[:3]: v for k, v in MESES.items()}
+
+    results = []
+    for seat_code, seat_name in seat_types:
+        map_url = (f"{base_url}/{venue_path}/Seats/ChooseMyOwn"
+                   f"?prod_id={prod_id}&perf_id={perf_id}"
+                   f"&section_id={section_id}&seat_type_id={seat_code}")
+        try:
+            map_html = requests.get(map_url, headers=headers, timeout=15).text
+        except Exception as e:
+            print(f"  HTTP error for {seat_code}: {e}")
+            continue
+
+        free_count = len(re.findall(
+            rf'class="pb_pyos_seat pb_pyos_free pb_pyos_seat_type_{seat_code}"', map_html
+        ))
+        held_count = len(re.findall(
+            rf'class="pb_pyos_seat pb_pyos_held pb_pyos_seat_type_{seat_code}"', map_html
+        ))
+        total = free_count + held_count
+        print(f"  {seat_code} ({seat_name}): free={free_count}, held={held_count}, total={total}")
+
+        if total == 0:
+            print(f"  No seat data for {seat_code}")
+            continue
+
+        # Date in pb_value span inside pb_event_attribute_date: "21 de nov de 2026, 18:00"
+        date_m = re.search(
+            r'pb_event_attribute_date[\s\S]*?pb_value[^>]*>\s*'
+            r'(\d+)\s+de\s+(\w+)\s+de\s+(\d{4})[,\s]+(\d{2}:\d{2})',
+            map_html, re.DOTALL | re.IGNORECASE
+        )
+        if date_m:
+            day, mon, year, t = date_m.group(1), date_m.group(2).lower(), date_m.group(3), date_m.group(4)
+            month_code = MESES.get(mon) or MESES_ABREV.get(mon[:3], "")
+            date_iso   = f"{year}-{month_code}-{day.zfill(2)}" if month_code else ""
+        else:
+            date_iso = ""
+
+        results.append({
+            "session_id": seat_code,           # "BUT" / "PALC"
+            "label":      seat_name,           # "Butaca" / "Palco" — shown on dashboard
+            "date":       date_iso,            # "2026-11-21" for sorting
+            "capacity":   total,
+            "sold":       held_count,          # includes invitation blocks → baseline needed
+            "reserved":   0,
+        })
+
+    return results
+
+
 SCRAPERS = {
     "todaslasentradas":  scrape_todaslasentradas,
     "bacantix":          scrape_bacantix,
     "reservaentradas":   scrape_reservaentradas,
     "auditoriocartuja":  scrape_auditoriocartuja,
     "ctickets":          scrape_ctickets,
+    "patronbase":        scrape_patronbase,
 }
 
 

@@ -1,7 +1,7 @@
 const TICKET_DOMAINS = [
   "gruposmedia.com", "entradas.plus",
   "todaslasentradas.com", "bacantix.com", "reservaentradas.com",
-  "auditoriocartuja.com", "ctickets.es",
+  "auditoriocartuja.com", "ctickets.es", "patronbase.com",
   "atrapalo.com", "ticketmaster.es", "eventbrite.es", "wegow.com", "fever.com",
 ];
 

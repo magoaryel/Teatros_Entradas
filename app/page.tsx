@@ -103,9 +103,9 @@ export default async function Dashboard() {
           </div>
 
           {eventData.map(event => {
-            // Baseline subtraction only for ctickets: admin blocks show as "ocupada" from day 1.
+            // Baseline subtraction for ctickets and patronbase: admin blocks show as held/ocupada from day 1.
             // All other platforms already return real sales in their sold count.
-            const useBaseline = event.platform === "ctickets";
+            const useBaseline = event.platform === "ctickets" || event.platform === "patronbase";
             const totalSold = event.sessions.reduce((s, sess) => {
               const baseline = useBaseline ? (sess.sold_baseline ?? 0) : 0;
               const real = Math.max(0, (sess.sold ?? 0) - baseline);
