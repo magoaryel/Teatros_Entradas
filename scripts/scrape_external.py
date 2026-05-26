@@ -533,15 +533,36 @@ def scrape_patronbase(_, url):
     }
 
     parsed     = urlparse(url)
-    venue_path = parsed.path.strip("/").split("/")[0]   # e.g. "_AuditorioBaranain"
+    path_parts = parsed.path.strip("/").split("/")
+    venue_path = path_parts[0]   # e.g. "_AuditorioBaranain"
     params     = parse_qs(parsed.query)
-    prod_id    = params.get("prod_id", [""])[0]
-    perf_id    = params.get("perf_id", ["1"])[0]
     base_url   = f"{parsed.scheme}://{parsed.netloc}"
 
+    # Support both URL formats:
+    #   .../Sections/Choose?prod_id=2635&perf_id=1  (from manual entry)
+    #   .../Productions/2635/Performances           (from showsaryel.com auto-discovery)
+    prod_id = params.get("prod_id", [""])[0]
+    perf_id = params.get("perf_id", [""])[0]
+
     if not prod_id:
-        print("  Could not extract prod_id from URL")
-        return []
+        # Try extracting prod_id from path: /.../_VENUE/Productions/2635/Performances
+        prod_m = re.search(r"/Productions/(\d+)", parsed.path)
+        if not prod_m:
+            print("  Could not extract prod_id from URL")
+            return []
+        prod_id = prod_m.group(1)
+
+    if not perf_id:
+        # Fetch Performances page to get the first available perf_id
+        perf_url = f"{base_url}/{venue_path}/Productions/{prod_id}/Performances"
+        try:
+            perf_html = requests.get(perf_url, headers=headers, timeout=15).text
+            perf_m    = re.search(r"name=['\"]perf_id['\"][^>]+value=['\"](\d+)['\"]", perf_html)
+            perf_id   = perf_m.group(1) if perf_m else "1"
+        except Exception as e:
+            print(f"  Could not fetch Performances page: {e}")
+            perf_id = "1"
+        print(f"  prod_id={prod_id}, perf_id={perf_id}")
 
     # Fetch the sections page to discover section_id and seat types
     sections_url = f"{base_url}/{venue_path}/Sections/Choose?prod_id={prod_id}&perf_id={perf_id}&submit=Continuar"
