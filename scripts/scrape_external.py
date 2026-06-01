@@ -11,6 +11,10 @@ try:
     from playwright_stealth import stealth_sync as _stealth
 except ImportError:
     _stealth = None
+try:
+    from camoufox.sync_api import Camoufox as _Camoufox
+except ImportError:
+    _Camoufox = None
 
 MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05","junio":"06",
          "julio":"07","agosto":"08","septiembre":"09","octubre":"10","noviembre":"11","diciembre":"12"}
@@ -760,58 +764,22 @@ def scrape_ukalarimenorca(page, url):
 # API endpoint: /api/events/{id} — returns event detail with seat availability.
 # URL format: https://tickets.oneboxtds.com/{venue}/events/{eventId}
 
-def scrape_oneboxtds(page, url):
-    api_data  = {}   # path → parsed JSON
-    all_calls = []   # (url, status) for ALL responses — debug only
-
-    def on_response(resp):
-        all_calls.append((resp.url, resp.status))
-        if "oneboxtds.com" not in resp.url:
-            return
-        try:
-            body   = resp.json()
-            suffix = resp.url.split("oneboxtds.com")[-1]
-            api_data[suffix] = body
-        except Exception:
-            pass
-
-    page.on("response", on_response)
-    # Extra timeout — Cloudflare challenge can take up to 15 s
-    page.goto(url, timeout=60000)
-    page.wait_for_load_state("networkidle", timeout=30000)
-    page.wait_for_timeout(10000)   # wait longer for CF challenge + Angular hydration
-
-    print(f"  Page after load: URL={page.url[:80]}  title={page.title()[:60]}")
-    print(f"  Total network calls: {len(all_calls)}")
-    print(f"  Intercepted {len(api_data)} oneboxtds.com calls:")
-    for path in api_data:
-        print(f"    {path[:80]}")
-
-    # If no oneboxtds calls intercepted, log all domains seen to diagnose
-    if not api_data:
-        domains = sorted({u.split("/")[2] for u, _ in all_calls if "/" in u})
-        print(f"  Domains seen: {domains[:15]}")
-        # Log page HTML sample to see if CF challenge is shown
-        html_sample = page.content()[:800]
-        print(f"  HTML sample: {html_sample[:300]}")
-
-    # Try to find the event API response (contains seat availability)
+def _parse_oneboxtds_responses(api_data, url):
+    """Parse intercepted oneboxtds API responses and return sessions list."""
     capacity = 0
     sold     = 0
     date_iso = ""
     label    = ""
-    event_id = re.search(r"/events/(\d+)", url)
-    event_id = event_id.group(1) if event_id else "main"
+    event_id_m = re.search(r"/events/(\d+)", url)
+    event_id   = event_id_m.group(1) if event_id_m else "main"
 
     for path, body in api_data.items():
         if not isinstance(body, dict):
-            # Could be a list — log it
             print(f"  [{path[:50]}] type={type(body).__name__}, sample={str(body)[:200]}")
             continue
 
         print(f"  [{path[:50]}] keys: {list(body.keys())[:10]}")
 
-        # Try common field names for availability
         cap   = (body.get("totalCapacity") or body.get("capacity") or body.get("Capacity")
                  or body.get("totalSeats") or body.get("TotalSeats")
                  or body.get("aforo") or 0)
@@ -846,6 +814,57 @@ def scrape_oneboxtds(page, url):
         "sold":       sold,
         "reserved":   0,
     }]
+
+
+def _run_oneboxtds_page(page, url):
+    """Navigate to oneboxtds URL and intercept API calls. Returns api_data dict."""
+    api_data  = {}
+    all_calls = []
+
+    def on_response(resp):
+        all_calls.append((resp.url, resp.status))
+        if "oneboxtds.com" not in resp.url:
+            return
+        try:
+            body   = resp.json()
+            suffix = resp.url.split("oneboxtds.com")[-1]
+            api_data[suffix] = body
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+    page.goto(url, timeout=60000)
+    page.wait_for_load_state("networkidle", timeout=30000)
+    page.wait_for_timeout(10000)
+
+    print(f"  Page after load: URL={page.url[:80]}  title={page.title()[:60]}")
+    print(f"  Total network calls: {len(all_calls)}")
+    print(f"  Intercepted {len(api_data)} oneboxtds.com calls:")
+    for path in api_data:
+        print(f"    {path[:80]}")
+
+    if not api_data:
+        domains = sorted({u.split("/")[2] for u, _ in all_calls if "/" in u})
+        print(f"  Domains seen: {domains[:15]}")
+        html_sample = page.content()
+        print(f"  HTML sample: {html_sample[:300]}")
+
+    return api_data
+
+
+def scrape_oneboxtds(_page, url):
+    # Use camoufox (patched Firefox) to bypass Cloudflare managed challenge.
+    # Chromium + playwright-stealth is detected; camoufox spoofs TLS + browser fingerprint.
+    if _Camoufox is None:
+        print("  camoufox not installed — cannot bypass Cloudflare")
+        return []
+
+    api_data = {}
+    with _Camoufox(headless=True, geoip=True) as browser:
+        cf_page = browser.new_page()
+        api_data = _run_oneboxtds_page(cf_page, url)
+
+    return _parse_oneboxtds_responses(api_data, url)
 
 
 SCRAPERS = {
