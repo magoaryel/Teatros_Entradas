@@ -726,14 +726,17 @@ def scrape_ukalarimenorca(page, url):
         r = requests.post(f"{_UKALARI_BASE}/events/list",
                           json={"StoreIds": [_UKALARI_STORE], "OrganizationIds": [_UKALARI_ORG]},
                           headers=hdrs, timeout=15)
-        ev = next((e for e in r.json().get("Data", []) if e.get("ShortLink") == slug), None)
-        if ev:
-            for sess in ev.get("Sessions", []):
-                start = sess.get("StartDate", "")
-                if start:
-                    date_iso = start[:10]
-                    time_str = start[11:16]
-                    break
+        if r.text.strip():
+            ev = next((e for e in r.json().get("Data", []) if e.get("ShortLink") == slug), None)
+            if ev:
+                for sess in ev.get("Sessions", []):
+                    start = sess.get("StartDate", "")
+                    if start:
+                        date_iso = start[:10]
+                        time_str = start[11:16]
+                        break
+        else:
+            print("  events/list fallback: empty response (tickets may not be on sale yet)")
     except Exception as e:
         print(f"  events/list fallback error: {e}")
 
@@ -754,10 +757,12 @@ def scrape_ukalarimenorca(page, url):
 # URL format: https://tickets.oneboxtds.com/{venue}/events/{eventId}
 
 def scrape_oneboxtds(page, url):
-    api_data = {}   # path → parsed JSON
+    api_data  = {}   # path → parsed JSON
+    all_calls = []   # (url, status) for ALL responses — debug only
 
     def on_response(resp):
-        if "oneboxtds.com/api" not in resp.url:
+        all_calls.append((resp.url, resp.status))
+        if "oneboxtds.com" not in resp.url:
             return
         try:
             body   = resp.json()
@@ -767,14 +772,24 @@ def scrape_oneboxtds(page, url):
             pass
 
     page.on("response", on_response)
-    # Extra timeout — Cloudflare challenge can take 5–10 s
-    page.goto(url, timeout=45000)
+    # Extra timeout — Cloudflare challenge can take up to 15 s
+    page.goto(url, timeout=60000)
     page.wait_for_load_state("networkidle", timeout=30000)
-    page.wait_for_timeout(5000)
+    page.wait_for_timeout(10000)   # wait longer for CF challenge + Angular hydration
 
-    print(f"  Intercepted {len(api_data)} oneboxtds API calls:")
-    for path, body in api_data.items():
+    print(f"  Page after load: URL={page.url[:80]}  title={page.title()[:60]}")
+    print(f"  Total network calls: {len(all_calls)}")
+    print(f"  Intercepted {len(api_data)} oneboxtds.com calls:")
+    for path in api_data:
         print(f"    {path[:80]}")
+
+    # If no oneboxtds calls intercepted, log all domains seen to diagnose
+    if not api_data:
+        domains = sorted({u.split("/")[2] for u, _ in all_calls if "/" in u})
+        print(f"  Domains seen: {domains[:15]}")
+        # Log page HTML sample to see if CF challenge is shown
+        html_sample = page.content()[:800]
+        print(f"  HTML sample: {html_sample[:300]}")
 
     # Try to find the event API response (contains seat availability)
     capacity = 0
@@ -786,10 +801,11 @@ def scrape_oneboxtds(page, url):
 
     for path, body in api_data.items():
         if not isinstance(body, dict):
+            # Could be a list — log it
+            print(f"  [{path[:50]}] type={type(body).__name__}, sample={str(body)[:200]}")
             continue
 
-        # Log raw structure on first run to understand the API
-        print(f"  [{path[:50]}] keys: {list(body.keys())[:8]}")
+        print(f"  [{path[:50]}] keys: {list(body.keys())[:10]}")
 
         # Try common field names for availability
         cap   = (body.get("totalCapacity") or body.get("capacity") or body.get("Capacity")
@@ -813,10 +829,10 @@ def scrape_oneboxtds(page, url):
             print(f"  Capacity from {path[:50]}: total={cap}, avail={avail}, sold={sold}")
             break
 
-    if not capacity:
-        print("  No capacity data — logging full sample for debugging:")
-        for path, body in list(api_data.items())[:2]:
-            print(f"    [{path[:50]}] {str(body)[:400]}")
+    if not capacity and api_data:
+        print("  No capacity fields found — logging full response bodies:")
+        for path, body in list(api_data.items())[:3]:
+            print(f"    [{path[:50]}] {str(body)[:500]}")
 
     return [{
         "session_id": event_id,
