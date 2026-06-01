@@ -45,11 +45,14 @@ export function detectPlatform(url: string): string {
   if (url.includes("reservaentradas.com")) return "reservaentradas";
   if (url.includes("auditoriocartuja.com")) return "auditoriocartuja";
   if (url.includes("ctickets.es")) return "ctickets";
+  if (url.includes("patronbase.com")) return "patronbase";
+  if (url.includes("oneboxtds.com")) return "oneboxtds";
+  if (url.includes("ukalarimenorcaevents.com")) return "ukalarimenorca";
   return "manual";
 }
 
 // Platforms that require a real browser (JS execution) — not supported on Vercel serverless
-const BROWSER_REQUIRED = ["todaslasentradas", "bacantix", "reservaentradas", "auditoriocartuja", "ctickets", "manual"];
+const BROWSER_REQUIRED = ["todaslasentradas", "bacantix", "reservaentradas", "auditoriocartuja", "ctickets", "patronbase", "oneboxtds", "ukalarimenorca", "manual"];
 
 export function requiresBrowser(platform: string): boolean {
   return BROWSER_REQUIRED.includes(platform);

@@ -645,6 +645,189 @@ def scrape_patronbase(_, url):
     return results
 
 
+
+# ── ukalarimenorcaevents.com (baila.pro API) ─────────────────────────────────
+# React SPA. Primary: Playwright intercepts GET /organizations/{org}/events/{ev}/stores/{store}
+# and capacityses endpoints. Fallback: POST /events/list via requests.
+# Constants hardcoded in JS bundle (index-3b2cb63f.js):
+#   store=4ef7b2c1-0f36-42c0-b33c-2c8a512a2f91, org=95f94967-30aa-454f-a070-78c790c6625c
+#   apiKey=026e7da582c94921a8be3a963cbe33d0 (Ocp-Apim-Subscription-Key)
+# Azure App Gateway blocks GET endpoints by IP — needs real browser TLS fingerprint.
+
+_UKALARI_STORE = "4ef7b2c1-0f36-42c0-b33c-2c8a512a2f91"
+_UKALARI_ORG   = "95f94967-30aa-454f-a070-78c790c6625c"
+_UKALARI_KEY   = "026e7da582c94921a8be3a963cbe33d0"
+_UKALARI_BASE  = "https://api.baila.pro/api/fan"
+
+def scrape_ukalarimenorca(page, url):
+    api_data = {}   # path_suffix → parsed JSON body
+
+    def on_response(resp):
+        if "api.baila.pro" not in resp.url:
+            return
+        try:
+            body    = resp.json()
+            suffix  = resp.url.split("api.baila.pro")[-1]
+            api_data[suffix] = body
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+    page.goto(url, timeout=30000)
+    page.wait_for_load_state("networkidle", timeout=20000)
+    page.wait_for_timeout(3000)
+
+    print(f"  Intercepted {len(api_data)} api.baila.pro calls:")
+    for path in api_data:
+        print(f"    {path[:90]}")
+
+    capacity = 0
+    sold     = 0
+
+    # Look for capacity data in any intercepted response
+    for path, body in api_data.items():
+        if not isinstance(body, dict):
+            continue
+        # stores endpoint and capacity endpoints share similar field names
+        cap   = (body.get("TotalSeats") or body.get("Capacity")
+                 or body.get("totalSeats") or body.get("capacity") or 0)
+        avail = (body.get("AvailableSeats") or body.get("Available")
+                 or body.get("availableSeats") or body.get("available") or 0)
+        if cap:
+            capacity = int(cap)
+            sold     = max(0, int(cap) - int(avail))
+            print(f"  Capacity from {path[:60]}: total={capacity}, avail={avail}, sold={sold}")
+            break
+
+    if not capacity:
+        print("  No capacity in intercepted calls — logging raw body samples for debugging:")
+        for path, body in list(api_data.items())[:3]:
+            sample = str(body)[:200]
+            print(f"    [{path[:50]}] {sample}")
+
+    # Extract date from URL slug: ...-YYYY-MM-DD
+    slug      = url.rstrip("/").split("/")[-1]
+    slug_date = re.search(r"(\d{4})-(\d{2})-(\d{2})$", slug)
+    if slug_date:
+        date_iso = f"{slug_date.group(1)}-{slug_date.group(2)}-{slug_date.group(3)}"
+    else:
+        date_iso = ""
+
+    # Also try POST events/list (works without browser, use for date/time)
+    time_str = "20:30"
+    try:
+        hdrs = {
+            "User-Agent": "Mozilla/5.0",
+            "Ocp-Apim-Subscription-Key": _UKALARI_KEY,
+            "x-api-version": "8",
+            "Content-Type": "application/json",
+            "Referer": "https://entradas.ukalarimenorcaevents.com/",
+        }
+        r = requests.post(f"{_UKALARI_BASE}/events/list",
+                          json={"StoreIds": [_UKALARI_STORE], "OrganizationIds": [_UKALARI_ORG]},
+                          headers=hdrs, timeout=15)
+        ev = next((e for e in r.json().get("Data", []) if e.get("ShortLink") == slug), None)
+        if ev:
+            for sess in ev.get("Sessions", []):
+                start = sess.get("StartDate", "")
+                if start:
+                    date_iso = start[:10]
+                    time_str = start[11:16]
+                    break
+    except Exception as e:
+        print(f"  events/list fallback error: {e}")
+
+    label = f"{date_iso}T{time_str}" if date_iso else slug
+    return [{
+        "session_id": slug,
+        "label":      label,
+        "date":       date_iso,
+        "capacity":   capacity,
+        "sold":       sold,
+        "reserved":   0,
+    }]
+
+
+# ── tickets.oneboxtds.com ────────────────────────────────────────────────────
+# Angular SPA behind Cloudflare Turnstile. Playwright passes the challenge automatically.
+# API endpoint: /api/events/{id} — returns event detail with seat availability.
+# URL format: https://tickets.oneboxtds.com/{venue}/events/{eventId}
+
+def scrape_oneboxtds(page, url):
+    api_data = {}   # path → parsed JSON
+
+    def on_response(resp):
+        if "oneboxtds.com/api" not in resp.url:
+            return
+        try:
+            body   = resp.json()
+            suffix = resp.url.split("oneboxtds.com")[-1]
+            api_data[suffix] = body
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+    # Extra timeout — Cloudflare challenge can take 5–10 s
+    page.goto(url, timeout=45000)
+    page.wait_for_load_state("networkidle", timeout=30000)
+    page.wait_for_timeout(5000)
+
+    print(f"  Intercepted {len(api_data)} oneboxtds API calls:")
+    for path, body in api_data.items():
+        print(f"    {path[:80]}")
+
+    # Try to find the event API response (contains seat availability)
+    capacity = 0
+    sold     = 0
+    date_iso = ""
+    label    = ""
+    event_id = re.search(r"/events/(\d+)", url)
+    event_id = event_id.group(1) if event_id else "main"
+
+    for path, body in api_data.items():
+        if not isinstance(body, dict):
+            continue
+
+        # Log raw structure on first run to understand the API
+        print(f"  [{path[:50]}] keys: {list(body.keys())[:8]}")
+
+        # Try common field names for availability
+        cap   = (body.get("totalCapacity") or body.get("capacity") or body.get("Capacity")
+                 or body.get("totalSeats") or body.get("TotalSeats")
+                 or body.get("aforo") or 0)
+        avail = (body.get("availableSeats") or body.get("available") or body.get("Available")
+                 or body.get("remainingSeats") or body.get("seatsAvailable") or 0)
+        s_date = (body.get("date") or body.get("startDate") or body.get("startDateTime")
+                  or body.get("eventDate") or "")
+
+        if s_date:
+            dm = re.match(r"(\d{4}-\d{2}-\d{2})", str(s_date))
+            if dm:
+                date_iso = dm.group(1)
+                time_m   = re.search(r"T(\d{2}:\d{2})", str(s_date))
+                label    = f"{date_iso}T{time_m.group(1)}" if time_m else date_iso
+
+        if cap:
+            capacity = int(cap)
+            sold     = max(0, int(cap) - int(avail))
+            print(f"  Capacity from {path[:50]}: total={cap}, avail={avail}, sold={sold}")
+            break
+
+    if not capacity:
+        print("  No capacity data — logging full sample for debugging:")
+        for path, body in list(api_data.items())[:2]:
+            print(f"    [{path[:50]}] {str(body)[:400]}")
+
+    return [{
+        "session_id": event_id,
+        "label":      label or event_id,
+        "date":       date_iso,
+        "capacity":   capacity,
+        "sold":       sold,
+        "reserved":   0,
+    }]
+
+
 SCRAPERS = {
     "todaslasentradas":  scrape_todaslasentradas,
     "bacantix":          scrape_bacantix,
@@ -652,6 +835,8 @@ SCRAPERS = {
     "auditoriocartuja":  scrape_auditoriocartuja,
     "ctickets":          scrape_ctickets,
     "patronbase":        scrape_patronbase,
+    "ukalarimenorca":    scrape_ukalarimenorca,
+    "oneboxtds":         scrape_oneboxtds,
 }
 
 
