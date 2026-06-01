@@ -7,6 +7,10 @@ Findings:
 """
 import os, json, re, sys, requests, datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+try:
+    from playwright_stealth import stealth_sync as _stealth
+except ImportError:
+    _stealth = None
 
 MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05","junio":"06",
          "julio":"07","agosto":"08","septiembre":"09","octubre":"10","noviembre":"11","diciembre":"12"}
@@ -866,10 +870,13 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
             locale="es-ES",
+            viewport={"width": 1280, "height": 800},
         )
         page = ctx.new_page()
+        if _stealth:
+            _stealth(page)
 
         for event in targets:
             platform = event["platform"]
