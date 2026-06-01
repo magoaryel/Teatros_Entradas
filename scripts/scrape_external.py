@@ -5,7 +5,7 @@ Findings:
  - bacantix.com:  MCIAjax.aspx response XML — O attr absent=libre, O=201=vendida
  - reservaentradas.com: Angular, need to navigate base→click Butacas step, then count butaca1
 """
-import os, json, re, sys, requests, datetime
+import os, json, re, sys, requests, datetime, concurrent.futures
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 try:
     from playwright_stealth import stealth_sync as _stealth
@@ -816,8 +816,9 @@ def _parse_oneboxtds_responses(api_data, url):
     }]
 
 
-def _run_oneboxtds_page(page, url):
-    """Navigate to oneboxtds URL and intercept API calls. Returns api_data dict."""
+def _camoufox_worker(url):
+    """Runs camoufox in an isolated thread — avoids asyncio conflict with sync_playwright."""
+    from camoufox.sync_api import Camoufox
     api_data  = {}
     all_calls = []
 
@@ -832,37 +833,40 @@ def _run_oneboxtds_page(page, url):
         except Exception:
             pass
 
-    page.on("response", on_response)
-    page.goto(url, timeout=60000)
-    page.wait_for_load_state("networkidle", timeout=30000)
-    page.wait_for_timeout(10000)
+    with Camoufox(headless=True, geoip=True) as browser:
+        page = browser.new_page()
+        page.on("response", on_response)
+        page.goto(url, timeout=60000)
+        page.wait_for_load_state("networkidle", timeout=30000)
+        page.wait_for_timeout(10000)
 
-    print(f"  Page after load: URL={page.url[:80]}  title={page.title()[:60]}")
-    print(f"  Total network calls: {len(all_calls)}")
-    print(f"  Intercepted {len(api_data)} oneboxtds.com calls:")
-    for path in api_data:
-        print(f"    {path[:80]}")
+        print(f"  Page after load: URL={page.url[:80]}  title={page.title()[:60]}")
+        print(f"  Total network calls: {len(all_calls)}")
+        print(f"  Intercepted {len(api_data)} oneboxtds.com calls:")
+        for path in api_data:
+            print(f"    {path[:80]}")
 
-    if not api_data:
-        domains = sorted({u.split("/")[2] for u, _ in all_calls if "/" in u})
-        print(f"  Domains seen: {domains[:15]}")
-        html_sample = page.content()
-        print(f"  HTML sample: {html_sample[:300]}")
+        if not api_data:
+            domains = sorted({u.split("/")[2] for u, _ in all_calls if "/" in u})
+            print(f"  Domains seen: {domains[:15]}")
+            print(f"  HTML sample: {page.content()[:300]}")
 
     return api_data
 
 
 def scrape_oneboxtds(_page, url):
-    # Use camoufox (patched Firefox) to bypass Cloudflare managed challenge.
-    # Chromium + playwright-stealth is detected; camoufox spoofs TLS + browser fingerprint.
+    # camoufox must run in a separate thread — its sync_api uses asyncio internally,
+    # which conflicts with sync_playwright's event loop if called from the same thread.
     if _Camoufox is None:
         print("  camoufox not installed — cannot bypass Cloudflare")
         return []
 
-    api_data = {}
-    with _Camoufox(headless=True, geoip=True) as browser:
-        cf_page = browser.new_page()
-        api_data = _run_oneboxtds_page(cf_page, url)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        try:
+            api_data = ex.submit(_camoufox_worker, url).result(timeout=120)
+        except Exception as e:
+            print(f"  camoufox error: {e}")
+            return []
 
     return _parse_oneboxtds_responses(api_data, url)
 
