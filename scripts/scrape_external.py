@@ -838,7 +838,23 @@ def _camoufox_worker(url):
         page.on("response", on_response)
         page.goto(url, timeout=60000)
         page.wait_for_load_state("networkidle", timeout=30000)
-        page.wait_for_timeout(10000)
+
+        # If CF challenge is showing, wait actively for it to resolve (up to 40s)
+        title = page.title()
+        if "Just a moment" in title or "Attention Required" in title:
+            print(f"  CF challenge detected ('{title}') — waiting for resolution...")
+            try:
+                page.wait_for_function(
+                    "!document.title.includes('Just a moment') && "
+                    "!document.title.includes('Attention Required')",
+                    timeout=40000,
+                )
+                page.wait_for_load_state("networkidle", timeout=15000)
+                print(f"  CF challenge resolved → '{page.title()}'")
+            except Exception as e:
+                print(f"  CF challenge did not resolve: {e}")
+
+        page.wait_for_timeout(5000)   # let Angular hydrate and fire API calls
 
         print(f"  Page after load: URL={page.url[:80]}  title={page.title()[:60]}")
         print(f"  Total network calls: {len(all_calls)}")
