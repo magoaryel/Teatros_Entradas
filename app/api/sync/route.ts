@@ -39,17 +39,28 @@ async function upsertShow(
   }
 
   // Then by page_url
-  const byPage = await db`SELECT id FROM events WHERE page_url = ${pageUrl} LIMIT 1`;
+  const byPage = await db`SELECT id, has_tickets FROM events WHERE page_url = ${pageUrl} LIMIT 1`;
   if (byPage.length > 0) {
-    await db`
-      UPDATE events SET
-        venue = ${venue},
-        platform = ${platform},
-        has_tickets = ${!!ticketUrl},
-        show_date = COALESCE(show_date, ${isoDate || null}),
-        url = ${ticketUrl ?? pageUrl}
-      WHERE id = ${byPage[0].id}
-    `;
+    if (!ticketUrl && byPage[0].has_tickets) {
+      // The page lost its ticket link (removed/temporary error on the website).
+      // NEVER downgrade a ticketed event to manual — that wipes its ticket URL.
+      await db`
+        UPDATE events SET
+          venue = ${venue},
+          show_date = COALESCE(show_date, ${isoDate || null})
+        WHERE id = ${byPage[0].id}
+      `;
+    } else {
+      await db`
+        UPDATE events SET
+          venue = ${venue},
+          platform = ${platform},
+          has_tickets = ${!!ticketUrl},
+          show_date = COALESCE(show_date, ${isoDate || null}),
+          url = ${ticketUrl ?? pageUrl}
+        WHERE id = ${byPage[0].id}
+      `;
+    }
     return byPage[0].id as number;
   }
 
