@@ -13,15 +13,27 @@ async function upsertShow(
 
   // Deduplicate by ticket URL first
   if (ticketUrl) {
-    const byTicket = await db`SELECT id FROM events WHERE url = ${ticketUrl} LIMIT 1`;
+    const byTicket = await db`SELECT id, page_url FROM events WHERE url = ${ticketUrl} LIMIT 1`;
     if (byTicket.length > 0) {
-      await db`
-        UPDATE events SET
-          page_url = ${pageUrl}, venue = ${venue},
-          has_tickets = true, platform = ${platform},
-          show_date = COALESCE(show_date, ${isoDate || null})
-        WHERE id = ${byTicket[0].id}
-      `;
+      const samePage = !byTicket[0].page_url || byTicket[0].page_url === pageUrl;
+      if (samePage) {
+        await db`
+          UPDATE events SET
+            page_url = ${pageUrl}, venue = ${venue},
+            has_tickets = true, platform = ${platform},
+            show_date = COALESCE(show_date, ${isoDate || null})
+          WHERE id = ${byTicket[0].id}
+        `;
+      } else {
+        // A DIFFERENT showsaryel page links to the same ticket URL (e.g. copy-paste
+        // error on the website). Don't let it steal venue/page_url from the original.
+        await db`
+          UPDATE events SET
+            has_tickets = true, platform = ${platform},
+            show_date = COALESCE(show_date, ${isoDate || null})
+          WHERE id = ${byTicket[0].id}
+        `;
+      }
       return byTicket[0].id as number;
     }
   }

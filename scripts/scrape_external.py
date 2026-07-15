@@ -19,6 +19,10 @@ except ImportError:
 MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05","junio":"06",
          "julio":"07","agosto":"08","septiembre":"09","octubre":"10","noviembre":"11","diciembre":"12"}
 
+# Full browser UA — some APIs (api.baila.pro gateway) reject the short "Mozilla/5.0" string
+FULL_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
 def _parse_es_date(day_s: str, month_s: str, year_s: str | None) -> str:
     """Return ISO date YYYY-MM-DD from Spanish day/month/year strings."""
     month = MESES.get(month_s.lower(), "")
@@ -215,18 +219,39 @@ def scrape_bacantix(page, url):
 # Uses Janto ticketing: apiw5.janto.es/v5/sessions/{code}/full/01
 # Event code (e.g. A291026HIPNOSTIS) is embedded in the page HTML
 
+def _janto_codes(html):
+    """Collect ALL Janto codes in the page (page may list multiple events)."""
+    api_codes = re.findall(r'apiw5\.janto\.es/[^/]+/sessions/([A-Z0-9]+)', html)
+    standalone = re.findall(r'["\'/]([A-Z]\d{6}[A-Z]{2,})["\'/]', html)
+    return list(dict.fromkeys(api_codes + standalone))  # deduplicate, keep order
+
+
 def scrape_auditoriocartuja(page, url):
+    html = ""
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        resp = requests.get(url, headers={"User-Agent": FULL_UA}, timeout=15)
+        print(f"  Page fetch (requests): HTTP {resp.status_code}, {len(resp.text)} bytes, final={resp.url[:80]}")
         html = resp.text
     except Exception as e:
         print(f"  HTTP error: {e}")
-        return []
 
-    # Collect ALL Janto codes in the page (page may list multiple events)
-    api_codes = re.findall(r'apiw5\.janto\.es/[^/]+/sessions/([A-Z0-9]+)', html)
-    standalone = re.findall(r'["\'/]([A-Z]\d{6}[A-Z]{2,})["\'/]', html)
-    all_codes = list(dict.fromkeys(api_codes + standalone))  # deduplicate, keep order
+    all_codes = _janto_codes(html)
+
+    # GH Actions datacenter IPs sometimes get a WAF page via requests — retry with real browser
+    if not all_codes:
+        print("  No Janto codes via requests — retrying with Playwright browser")
+        try:
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+            html = page.content()
+            all_codes = _janto_codes(html)
+            print(f"  Browser fetch: {len(html)} bytes, codes found: {len(all_codes)}")
+        except Exception as e:
+            print(f"  Browser fallback error: {e}")
+
+    if not all_codes:
+        print("  No Janto codes found at all")
+        return []
 
     # Prefer code associated with the URL fragment (e.g. #web5) — look in that HTML section
     fragment = url.split("#")[-1] if "#" in url else ""
@@ -692,18 +717,34 @@ def scrape_ukalarimenorca(page, url):
     capacity = 0
     sold     = 0
 
-    # Look for capacity data in any intercepted response
+    def _find_capacity(obj, depth=0):
+        """Recursively look for capacity/available fields in nested API responses."""
+        if depth > 5:
+            return None
+        if isinstance(obj, dict):
+            cap   = (obj.get("TotalSeats") or obj.get("Capacity")
+                     or obj.get("totalSeats") or obj.get("capacity") or 0)
+            avail = (obj.get("AvailableSeats") or obj.get("Available")
+                     or obj.get("availableSeats") or obj.get("available") or 0)
+            if cap:
+                return int(cap), int(avail)
+            for v in obj.values():
+                found = _find_capacity(v, depth + 1)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = _find_capacity(item, depth + 1)
+                if found:
+                    return found
+        return None
+
+    # Look for capacity data in any intercepted response (also nested, e.g. Data[].Sessions[])
     for path, body in api_data.items():
-        if not isinstance(body, dict):
-            continue
-        # stores endpoint and capacity endpoints share similar field names
-        cap   = (body.get("TotalSeats") or body.get("Capacity")
-                 or body.get("totalSeats") or body.get("capacity") or 0)
-        avail = (body.get("AvailableSeats") or body.get("Available")
-                 or body.get("availableSeats") or body.get("available") or 0)
-        if cap:
-            capacity = int(cap)
-            sold     = max(0, int(cap) - int(avail))
+        found = _find_capacity(body)
+        if found:
+            capacity, avail = found
+            sold = max(0, capacity - avail)
             print(f"  Capacity from {path[:60]}: total={capacity}, avail={avail}, sold={sold}")
             break
 
@@ -722,13 +763,15 @@ def scrape_ukalarimenorca(page, url):
         date_iso = ""
 
     # Also try POST events/list (works without browser, use for date/time)
+    # NOTE: the baila.pro API gateway rejects the short "Mozilla/5.0" UA — needs FULL_UA
     time_str = "20:30"
     try:
         hdrs = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": FULL_UA,
             "Ocp-Apim-Subscription-Key": _UKALARI_KEY,
             "x-api-version": "8",
             "Content-Type": "application/json",
+            "Origin": "https://entradas.ukalarimenorcaevents.com",
             "Referer": "https://entradas.ukalarimenorcaevents.com/",
         }
         r = requests.post(f"{_UKALARI_BASE}/events/list",
@@ -747,6 +790,12 @@ def scrape_ukalarimenorca(page, url):
             print("  events/list fallback: empty response (tickets may not be on sale yet)")
     except Exception as e:
         print(f"  events/list fallback error: {e}")
+
+    if not capacity:
+        # baila.pro no longer exposes numeric availability publicly (only HasAvailability).
+        # Don't save a fake 0/0 session — leave the event as "pending" on the dashboard.
+        print("  No numeric capacity available — skipping (not saving 0/0)")
+        return []
 
     label = f"{date_iso}T{time_str}" if date_iso else slug
     return [{

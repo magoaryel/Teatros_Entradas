@@ -2,7 +2,8 @@ name: Scrape Ticket Platforms
 
 on:
   schedule:
-    - cron: "*/20 * * * *"
+    # Odd minutes reduce GitHub's scheduled-run throttling (peak minutes :00/:20/:40 get dropped more)
+    - cron: "3,23,43 * * * *"
   workflow_dispatch:
 
 env:
@@ -11,10 +12,27 @@ env:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
+
+      # Discover new shows from showsaryel.com/gira (adds them to the DB)
+      - name: Sync shows from showsaryel.com
+        env:
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+        run: |
+          BASE="${INGEST_URL%/api/ingest}"
+          curl -sf -X POST --max-time 120 "$BASE/api/sync" || echo "sync failed (non-fatal)"
+
+      # Scrape Vercel-side platforms (gruposmedia/Madrid) — also sends Telegram notifications.
+      # Vercel Hobby has no frequent cron, so this workflow is what keeps Madrid updated.
+      - name: Scrape gruposmedia via Vercel
+        env:
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+        run: |
+          BASE="${INGEST_URL%/api/ingest}"
+          curl -sf --max-time 120 "$BASE/api/cron/scrape" || echo "vercel scrape failed (non-fatal)"
 
       - uses: actions/setup-python@v5
         with:
@@ -22,7 +40,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright requests playwright-stealth "camoufox[geoip]"
+          # playwright pinned to 1.49.1: newer versions speak a juggler protocol
+          # camoufox's bundled Firefox doesn't understand (Browser.setDefaultViewport isMobile error)
+          pip install "playwright==1.49.1" requests "camoufox[geoip]"
           playwright install chromium --with-deps
           python -m camoufox fetch
 

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 **Monitor de Entradas — Aryel Altamar**  
-A Next.js web app that tracks ticket sales across multiple Spanish theatres for the performer Aryel Altamar. Deployed on Vercel. GitHub Actions runs a Playwright scraper every 10 minutes for JS-heavy platforms.
+A Next.js web app that tracks ticket sales across multiple Spanish theatres for the performer Aryel Altamar. Deployed on Vercel. GitHub Actions runs a Playwright scraper on a `3,23,43 * * * *` cron — but GitHub throttles scheduled runs heavily (effective cadence ≈ 20 min–3 h). The same workflow also calls `/api/sync` (show discovery) and `/api/cron/scrape` (gruposmedia + Telegram) since Vercel Hobby has no frequent cron (`vercel.json` cron was removed on purpose).
 
 Live: `https://teatrosaryel.vercel.app`  
 Repo: `https://github.com/magoaryel/Teatros_Entradas`
@@ -28,11 +28,13 @@ npm start        # production server
 ### Data flow
 
 ```
-showsaryel.com ──sync──► events table (auto-discovered)
-gruposmedia.com ──fetch──► /api/cron/scrape (Vercel) ──► snapshots
-bacantix/todaslasentradas/ctickets ──playwright──► GitHub Actions ──► /api/ingest ──► snapshots
-reservaentradas/auditoriocartuja ──HTTP──► GitHub Actions ──► /api/ingest ──► snapshots
+GitHub Actions (cron 3,23,43 * * * *):
+  1. curl POST /api/sync            ──► discovers shows from showsaryel.com/gira
+  2. curl GET  /api/cron/scrape     ──► Vercel scrapes gruposmedia + Telegram notify
+  3. python scripts/scrape_external.py ──► browser/HTTP platforms ──► /api/ingest ──► snapshots
 ```
+
+The dashboard "🔄 Actualizar todo" button also calls `/api/cron/scrape` on demand.
 
 ### Key files
 
@@ -55,12 +57,18 @@ reservaentradas/auditoriocartuja ──HTTP──► GitHub Actions ──► /a
 | `todaslasentradas` | GitHub Actions Playwright | CSS classes `mapaLibre` / `mapaOcupada` |
 | `bacantix` | GitHub Actions Playwright | MCIAjax.aspx XML — `<E Estados="..."/>` string, pos N = state of seat id N; `'1'`=libre, `'3'`=vendida (NOT O attr, which is orientation) |
 | `reservaentradas` | GitHub Actions HTTP | `sesionv2` API on venue subdomain: `https://{slug}.reservaentradas.com/{slug}/sesionv2?recinto=X&sesion=EVENT_ID&key=apirswebphp` — returns `Sesion.Aforo` and `Sesion.Disponibles` |
-| `auditoriocartuja` | GitHub Actions HTTP | Janto API: `apiw5.janto.es/v5/sessions/{code}/full/01` — requires Referer header; `sessions` is a dict not a list |
+| `auditoriocartuja` | GitHub Actions HTTP | Janto API: `apiw5.janto.es/v5/sessions/{code}/full/01` — requires Referer header; `sessions` is a dict not a list. Venue page may WAF-block `requests` from GH runners → Playwright fallback fetches the HTML |
 | `ctickets` | GitHub Actions Playwright | Server-rendered HTML; click each available zone → count `.libre` / `.ocupada` CSS classes. Sold-out zones have `class="zonacompleta"` |
+| `patronbase` | GitHub Actions HTTP | Server-rendered seat maps: `pb_pyos_free` / `pb_pyos_held` classes per seat type; held includes admin blocks → sold_baseline applies |
+| `oneboxtds` | GitHub Actions camoufox | Angular SPA behind Cloudflare — needs camoufox (Firefox). playwright MUST stay pinned to 1.49.1 or camoufox's juggler protocol breaks (`setDefaultViewport isMobile` error) |
+| `ukalarimenorca` | GitHub Actions Playwright | baila.pro API. Gateway rejects short `Mozilla/5.0` UA — use full Chrome UA. No public numeric availability (only `HasAvailability`) → scraper returns [] instead of fake 0/0 |
 
 ### TICKET_DOMAINS (syncShows.ts)
 Events are auto-discovered from showsaryel.com/gira/ only when ticket URLs belong to these domains:
-`gruposmedia.com`, `entradas.plus`, `todaslasentradas.com`, `bacantix.com`, `reservaentradas.com`, `auditoriocartuja.com`, `ctickets.es`, `atrapalo.com`, `ticketmaster.es`, `eventbrite.es`, `wegow.com`, `fever.com`
+`gruposmedia.com`, `entradas.plus`, `todaslasentradas.com`, `bacantix.com`, `reservaentradas.com`, `auditoriocartuja.com`, `ctickets.es`, `patronbase.com`, `oneboxtds.com`, `ukalarimenorcaevents.com`, `atrapalo.com`, `ticketmaster.es`, `eventbrite.es`, `wegow.com`, `fever.com`
+
+### Sync dedup rule (app/api/sync/route.ts)
+Dedup is by ticket URL first. If a DIFFERENT showsaryel page links to the same ticket URL (copy-paste error on the website, e.g. Novelda page → Menorca tickets), it must NOT steal `venue`/`page_url` from the original event.
 
 ### formatDate() rule (app/page.tsx)
 Only parses strings starting with `\d{4}-\d{2}-\d{2}` (ISO format). All scrapers must store labels as ISO datetime `"YYYY-MM-DDTHH:MM"` — non-ISO strings are returned as-is to avoid wrong year bugs (e.g. year 2001).
@@ -94,15 +102,19 @@ sessions  (id, event_id, session_id, session_label, session_date, total_capacity
 snapshots (id, session_id, sold, reserved, available, captured_at)
 ```
 
-### Active shows (as of May 2026)
+### Active shows (as of July 2026)
 
 | Ciudad | Venue | Fecha | Plataforma |
 |---|---|---|---|
-| Madrid | Teatro Fígaro | May + Jun 2026 | gruposmedia |
-| Almería | Teatro Cervantes | 16 May 2026 | todaslasentradas |
-| Palencia | Teatro Cines Ortega | 30 May 2026 | reservaentradas |
+| Madrid | Teatro Fígaro | Nov 2026 – Ene 2027 (varias) | gruposmedia (idEvento=20813, all sessions in one event) |
 | Salamanca | Palacio de Congresos | 18 Oct 2026 | ctickets |
-| Sevilla | Auditorio Cartuja | 29 Oct 2026 | auditoriocartuja |
-| Santander | Auditorium Salesianos | 22 Nov 2026 | ctickets |
+| Sevilla | Auditorio Cartuja | 29 Oct 2026 | auditoriocartuja (code A291026HIPNOSTIS) |
+| Málaga | Ópera Benalmádena | — | oneboxtds |
+| Pamplona | Auditorio Barañain | 21 Nov 2026 | patronbase |
+| Santander | Auditórium Salesianos | 22 Nov 2026 | ctickets |
+| Menorca | Teatro Ukalari | 13 Nov 2026 | ukalarimenorca (no numeric availability) |
 | Burgos | Cultural Caja de Burgos | 27 Nov 2026 | bacantix |
 | León | Auditorio Ciudad de León | 12 Dec 2026 | ctickets |
+| Cádiz | — | — | ctickets (12330) |
+
+Many more shows on showsaryel.com have no online ticket link yet → platform `manual`, shown greyed out.

@@ -229,7 +229,7 @@ export default async function Dashboard() {
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "28px 0 16px" }}>
             <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)" }}>
-              Entradas online — actualizando cada 10 min
+              Entradas online — actualización automática
             </div>
             <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
           </div>
