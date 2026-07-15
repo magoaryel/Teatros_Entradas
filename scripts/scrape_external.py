@@ -855,6 +855,11 @@ def _parse_oneboxtds_responses(api_data, url):
         for path, body in list(api_data.items())[:3]:
             print(f"    [{path[:50]}] {str(body)[:500]}")
 
+    if not capacity:
+        # Don't save fake 0/0 sessions when Cloudflare blocked us or fields unknown
+        print("  No capacity — skipping (not saving 0/0)")
+        return []
+
     return [{
         "session_id": event_id,
         "label":      label or event_id,
@@ -882,7 +887,9 @@ def _camoufox_worker(url):
         except Exception:
             pass
 
-    with Camoufox(headless=True, geoip=True) as browser:
+    # headless="virtual" runs under Xvfb (installed in the workflow) — Cloudflare
+    # detects pure headless mode; a virtual display passes the challenge far more often
+    with Camoufox(headless="virtual", geoip=True) as browser:
         page = browser.new_page()
         page.on("response", on_response)
         page.goto(url, timeout=60000)
