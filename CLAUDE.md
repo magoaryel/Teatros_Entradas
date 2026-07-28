@@ -57,10 +57,10 @@ The dashboard "🔄 Actualizar todo" button also calls `/api/cron/scrape` on dem
 | `todaslasentradas` | GitHub Actions Playwright | CSS classes `mapaLibre` / `mapaOcupada` |
 | `bacantix` | GitHub Actions Playwright | MCIAjax.aspx XML — `<E Estados="..."/>` string, pos N = state of seat id N; `'1'`=libre, `'3'`=vendida (NOT O attr, which is orientation) |
 | `reservaentradas` | GitHub Actions HTTP | `sesionv2` API on venue subdomain: `https://{slug}.reservaentradas.com/{slug}/sesionv2?recinto=X&sesion=EVENT_ID&key=apirswebphp` — returns `Sesion.Aforo` and `Sesion.Disponibles` |
-| `auditoriocartuja` | GitHub Actions HTTP | Janto API: `apiw5.janto.es/v5/sessions/{code}/full/01` — requires Referer header; `sessions` is a dict not a list. Venue page may WAF-block `requests` from GH runners → Playwright fallback fetches the HTML |
+| `auditoriocartuja` | GitHub Actions HTTP | Janto API: `apiw5.janto.es/v5/sessions/{code}/full/01` — requires Referer header; `sessions` is a dict not a list. The venue WAF-blocks GH runners (serves a ~12 KB page, Playwright too), so code discovery fails there → `_JANTO_FALLBACK_CODES` supplies the known code. New show ⇒ add its code (pattern `A`+DDMMYY+NAME) |
 | `ctickets` | GitHub Actions HTTP | Each zone has its own GET seat-map URL: `/comprar_entradas/{event}/{zone}` — works for sold-out zones too (they carry `class="zonacompleta"` on the event page). Count `libre` / `ocupada` classes. No browser needed |
 | `patronbase` | GitHub Actions HTTP | Server-rendered seat maps: `pb_pyos_free` / `pb_pyos_held` classes per seat type; held includes admin blocks → sold_baseline applies |
-| `oneboxtds` | GitHub Actions camoufox | Angular SPA behind Cloudflare — needs camoufox (Firefox). playwright MUST stay pinned to 1.49.1 or camoufox's juggler protocol breaks (`setDefaultViewport isMobile` error) |
+| `oneboxtds` | GitHub Actions camoufox | Angular SPA behind Cloudflare — needs camoufox (Firefox) with `headless="virtual"` + xvfb; plain headless never clears the challenge. playwright MUST stay pinned to 1.49.1 or camoufox's juggler protocol breaks (`setDefaultViewport isMobile` error). Numbers come from `/channels-api/v1/catalog/events/{id}/sessions` → `availability: {total, available}`; date is nested at `date.start` |
 | `ukalarimenorca` | GitHub Actions Playwright | baila.pro API. Gateway rejects short `Mozilla/5.0` UA — use full Chrome UA. No public numeric availability (only `HasAvailability`) → scraper returns [] instead of fake 0/0 |
 
 ### TICKET_DOMAINS (syncShows.ts)
@@ -82,19 +82,22 @@ Called before each ingest batch — removes sessions whose `session_id` is not i
 ### Sort order (getEvents)
 Events sorted by nearest upcoming `session_date` via `MIN(s.session_date) WHERE >= today`. Falls back to `show_date` then `created_at`. NULLS LAST. All scrapers must output `date` as `"YYYY-MM-DD"` ISO string.
 
-### GitHub Actions minutes budget (private repo!)
+### GitHub Actions minutes budget
 
-The repo is **private**, so every Actions minute counts against the Free plan's
-2000 min/month. In July 2026 the job cost ~4.9 min/run (~2100 min/month) and the
-account got blocked — every run then failed in ~4s with **0 steps and no logs**.
+The repo is **public since 28 Jul 2026**, so Actions minutes are free and
+unlimited. It used to be private: minutes then counted against the Free plan's
+2000/month, the job cost ~4.9 min/run (~2100 min/month), and the account got
+blocked — every run failed in ~4s with **0 steps and no logs**.
 
 Diagnosing that state: a run with `steps=0` and a 404 on the logs endpoint is
 *never* a code bug. Read the check-run annotation:
 `GET /repos/{owner}/{repo}/check-runs/{job_id}/annotations`
 
-Keep the job cheap (currently ~1.7 min/run): ctickets and patronbase are plain
-HTTP, browsers are cached between runs, and only bacantix / ukalarimenorca /
-oneboxtds (camoufox) still need a real browser.
+**If the repo is ever made private again**, the budget matters. The job is now
+~2 min/run: ctickets and patronbase are plain HTTP, browsers are cached between
+runs, and only bacantix / ukalarimenorca / oneboxtds (camoufox) need a browser.
+Because it is public, never commit real credentials — secrets belong in GitHub
+Secrets and Vercel env vars.
 
 ### Environment variables
 
@@ -120,10 +123,10 @@ snapshots (id, session_id, sold, reserved, available, captured_at)
 
 | Ciudad | Venue | Fecha | Plataforma |
 |---|---|---|---|
-| Madrid | Teatro Fígaro | Nov 2026 – Ene 2027 (varias) | gruposmedia (idEvento=20813, all sessions in one event) |
+| Málaga | Ópera Benalmádena | 2 Ago 2026 | oneboxtds (event 51644, aforo 888) |
+| Madrid | Teatro Fígaro | Sep 2026 – Ene 2027 (varias) | gruposmedia (idEvento=20813, all sessions in one event) |
 | Salamanca | Palacio de Congresos | 18 Oct 2026 | ctickets |
 | Sevilla | Auditorio Cartuja | 29 Oct 2026 | auditoriocartuja (code A291026HIPNOSTIS) |
-| Málaga | Ópera Benalmádena | — | oneboxtds |
 | Pamplona | Auditorio Barañain | 21 Nov 2026 | patronbase |
 | Santander | Auditórium Salesianos | 22 Nov 2026 | ctickets |
 | Menorca | Teatro Ukalari | 13 Nov 2026 | ukalarimenorca (no numeric availability) |
