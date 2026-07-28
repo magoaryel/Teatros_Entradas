@@ -219,6 +219,16 @@ def scrape_bacantix(page, url):
 # Uses Janto ticketing: apiw5.janto.es/v5/sessions/{code}/full/01
 # Event code (e.g. A291026HIPNOSTIS) is embedded in the page HTML
 
+# auditoriocartuja.com serves GitHub Actions runners a ~12 KB block page instead of
+# the real 400 KB one (datacenter IPs are WAF-filtered — Playwright gets blocked too),
+# so no Janto code can be discovered from there. The Janto API itself answers fine.
+# Codes follow the pattern A + DDMMYY + SHOWNAME, so a new show needs a new entry here.
+# Discovery from the page still runs first and wins whenever it works.
+_JANTO_FALLBACK_CODES = {
+    "auditoriocartuja.com": ["A291026HIPNOSTIS"],   # Sevilla, 29 Oct 2026
+}
+
+
 def _janto_codes(html):
     """Collect ALL Janto codes in the page (page may list multiple events)."""
     api_codes = re.findall(r'apiw5\.janto\.es/[^/]+/sessions/([A-Z0-9]+)', html)
@@ -248,6 +258,13 @@ def scrape_auditoriocartuja(page, url):
             print(f"  Browser fetch: {len(html)} bytes, codes found: {len(all_codes)}")
         except Exception as e:
             print(f"  Browser fallback error: {e}")
+
+    if not all_codes:
+        for domain, codes in _JANTO_FALLBACK_CODES.items():
+            if domain in url:
+                all_codes = list(codes)
+                print(f"  Page blocked — using known codes for {domain}: {all_codes}")
+                break
 
     if not all_codes:
         print("  No Janto codes found at all")
@@ -821,10 +838,20 @@ def _parse_oneboxtds_responses(api_data, url):
     if sessions_body is None:
         sessions_body = next((b for p, b in api_data.items() if "/sessions" in p), None)
 
+    def _num(v):
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
     results = []
     for s in _obx_session_items(sessions_body):
-        cap   = _obx_deep_find(s, _OBX_CAP_KEYS)
-        avail = _obx_deep_find(s, _OBX_AVAIL_KEYS)
+        # Onebox keeps the real numbers in the session's availability object:
+        #   "availability": {"type": "BOUNDED", "total": 888, "available": 732}
+        # Read it directly — a blind deep search would also match the payload's
+        # pagination "metadata": {"total": 1}.
+        availability = s.get("availability") if isinstance(s.get("availability"), dict) else {}
+        cap   = _num(availability.get("total"))     or _obx_deep_find(s, _OBX_CAP_KEYS)
+        avail = _num(availability.get("available"))
+        if avail is None:
+            avail = _obx_deep_find(s, _OBX_AVAIL_KEYS)
         sold  = _obx_deep_find(s, _OBX_SOLD_KEYS)
 
         if cap is None and avail is not None and sold is not None:
@@ -834,12 +861,20 @@ def _parse_oneboxtds_responses(api_data, url):
         if sold is None:
             sold = max(0, cap - (avail or 0))
 
+        # Date is a nested object too: {"start": "2026-08-02T22:00:00+02:00", ...}
         raw_date = ""
-        for key in ("startDate", "date", "startDateTime", "sessionDate", "eventDate", "start"):
-            val = s.get(key)
-            if isinstance(val, str) and re.match(r"\d{4}-\d{2}-\d{2}", val):
-                raw_date = val
-                break
+        date_val = s.get("date")
+        if isinstance(date_val, dict):
+            raw_date = str(date_val.get("start") or "")
+        elif isinstance(date_val, str):
+            raw_date = date_val
+        if not re.match(r"\d{4}-\d{2}-\d{2}", raw_date):
+            raw_date = ""
+            for key in ("startDate", "startDateTime", "sessionDate", "eventDate", "start"):
+                val = s.get(key)
+                if isinstance(val, str) and re.match(r"\d{4}-\d{2}-\d{2}", val):
+                    raw_date = val
+                    break
         date_iso = raw_date[:10]
         time_m   = re.search(r"T(\d{2}:\d{2})", raw_date)
         label    = f"{date_iso}T{time_m.group(1)}" if (date_iso and time_m) else (date_iso or event_id)
