@@ -1,0 +1,6 @@
+# playwright pinned to 1.49.1: newer versions speak a juggler protocol camoufox's
+# bundled Firefox doesn't understand (Browser.setDefaultViewport isMobile error).
+# Do NOT bump without re-testing the oneboxtds scraper.
+playwright==1.49.1
+requests
+camoufox[geoip]

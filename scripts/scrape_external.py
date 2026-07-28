@@ -429,26 +429,22 @@ def scrape_reservaentradas(_, url):
 
 
 # ── ctickets.es ──────────────────────────────────────────────────────────────
-# Page is server-rendered. Zone list shows which zones are "completo".
-# Per-seat counts need Playwright: click an available zone → form submits →
-# next page shows seat map. Intercept AJAX or count seat elements in DOM.
+# Fully server-rendered — NO Playwright needed (verified jul 2026).
+# Each zone's seat map has its own GET URL: /comprar_entradas/{event}/{zone}
+# That URL works for sold-out zones too, so the old "inject a hidden input and
+# submit the form" Playwright hack is obsolete. Seat classes: libre / ocupada.
+# Counts verified identical to the Playwright version (León 772 aforo / 129 vendidas).
 
-def scrape_ctickets(page, url):
-    ajax_bodies = []
+def scrape_ctickets(_, url):
+    base = url.rstrip("/")
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": FULL_UA, "Accept-Language": "es-ES,es;q=0.9"})
 
-    def on_response(resp):
-        if "ctickets.es" in resp.url and resp.request.resource_type in ("xhr", "fetch", "document"):
-            try:
-                body = resp.body().decode("utf-8", errors="replace")
-                if len(body) > 200:   # ignore tiny pings
-                    ajax_bodies.append((resp.url, body))
-            except: pass
-
-    page.on("response", on_response)
-    page.goto(url, timeout=30000)
-    page.wait_for_load_state("networkidle", timeout=20000)
-
-    html = page.content()
+    try:
+        html = sess.get(base, timeout=20).text
+    except Exception as e:
+        print(f"  HTTP error fetching event page: {e}")
+        return []
 
     # ── Collect zone IDs ──────────────────────────────────────────────────────
     avail_ids = re.findall(r'<input[^>]+radioZona[^>]+value="(\d+)"', html)
@@ -461,76 +457,32 @@ def scrape_ctickets(page, url):
         if label_m:
             sold_ids.append(label_m.group(1))
 
-    total_zones = len(avail_ids) + len(sold_ids)
-    print(f"  zonas disponibles={len(avail_ids)}, agotadas={len(sold_ids)}, total={total_zones}")
+    print(f"  zonas disponibles={len(avail_ids)}, agotadas={len(sold_ids)}, "
+          f"total={len(avail_ids) + len(sold_ids)}")
 
-    def _navigate_zone(zone_id, is_sold_out=False):
-        """Navigate to a zone seat map and return {libre, ocupada}."""
-        page.goto(url, timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=20000)
-        if is_sold_out:
-            # No radio button — inject a hidden input with the zone ID
-            page.evaluate(f"""
-                (() => {{
-                    const form = document.getElementById('reserva-entradas');
-                    if (!form) return;
-                    const inp = document.createElement('input');
-                    inp.type  = 'hidden';
-                    inp.name  = 'data[ZonaRecintoSesion][id]';
-                    inp.value = '{zone_id}';
-                    form.appendChild(inp);
-                }})()
-            """)
-            page.wait_for_timeout(300)
-        else:
-            page.click(f"input#id_{zone_id}")
-            page.wait_for_timeout(500)
-        for btn_sel in ['input[type="submit"]', 'button[type="submit"]',
-                        'button:has-text("Continuar")', 'button:has-text("Comprar")']:
-            btn = page.query_selector(btn_sel)
-            if btn and btn.is_visible():
-                btn.click()
-                break
-        page.wait_for_load_state("networkidle", timeout=15000)
-        page.wait_for_timeout(2000)
-        return page.evaluate("""() => {
-            const libre   = document.querySelectorAll('[class*="libre"]:not([class*="leyenda"])').length;
-            const ocupada = document.querySelectorAll('[class*="ocupada"]:not([class*="leyenda"]), [class*="reservada"]:not([class*="leyenda"])').length;
-            return {libre, ocupada};
-        }""")
+    def _zone_seats(zone_id):
+        """GET a zone's seat map and count free/occupied seats."""
+        zr = sess.get(f"{base}/{zone_id}", headers={"Referer": base}, timeout=20)
+        libre   = len(re.findall(r'class="[^"]*\blibre\b[^"]*"', zr.text))
+        ocupada = len(re.findall(r'class="[^"]*\b(?:ocupada|reservada)\b[^"]*"', zr.text))
+        return libre, ocupada
 
-    # ── Click each available zone and sum seats ───────────────────────────────
     seat_total = seat_avail = 0
-
-    for zone_id in avail_ids:
+    for zone_id in avail_ids + sold_ids:
+        tag = " (agotada)" if zone_id in sold_ids else ""
         try:
-            d = _navigate_zone(zone_id, is_sold_out=False)
-            z_total = d["libre"] + d["ocupada"]
-            print(f"  Zona {zone_id}: libre={d['libre']}, ocupada={d['ocupada']}")
-            seat_avail += d["libre"]
-            seat_total += z_total
+            libre, ocupada = _zone_seats(zone_id)
+            print(f"  Zona {zone_id}{tag}: libre={libre}, ocupada={ocupada}")
+            seat_avail += libre
+            seat_total += libre + ocupada
         except Exception as e:
-            print(f"  Zona {zone_id} error: {e}")
-
-    # ── Try sold-out zones — inject zone ID; server may still serve the seat map ──
-    for zone_id in sold_ids:
-        try:
-            d = _navigate_zone(zone_id, is_sold_out=True)
-            z_total = d["libre"] + d["ocupada"]
-            print(f"  Zona {zone_id} (agotada): libre={d['libre']}, ocupada={d['ocupada']}")
-            if z_total > 0:
-                seat_avail += d["libre"]
-                seat_total += z_total
-            else:
-                print(f"  Zona {zone_id} (agotada): servidor no devuelve mapa, zona ignorada")
-        except Exception as e:
-            print(f"  Zona {zone_id} (agotada) error: {e}")
+            print(f"  Zona {zone_id}{tag} error: {e}")
 
     # ── Compute totals ────────────────────────────────────────────────────────
     capacity = seat_total
     sold     = seat_total - seat_avail
-    counted  = len(avail_ids)  # agotadas only added if server returned a seat map
-    print(f"  Seat data ({counted} zonas disponibles + agotadas con mapa): total={capacity}, sold={sold}")
+    print(f"  Seat data ({len(avail_ids)} disponibles + {len(sold_ids)} agotadas): "
+          f"total={capacity}, sold={sold}")
 
     if capacity == 0:
         print("  No data found")
@@ -813,61 +765,106 @@ def scrape_ukalarimenorca(page, url):
 # API endpoint: /api/events/{id} — returns event detail with seat availability.
 # URL format: https://tickets.oneboxtds.com/{venue}/events/{eventId}
 
+_OBX_CAP_KEYS   = ("totalcapacity", "capacity", "totalseats", "aforo", "totaltickets",
+                   "maxcapacity", "totalstock", "seatstotal")
+_OBX_AVAIL_KEYS = ("availableseats", "availabletickets", "remainingseats", "seatsavailable",
+                   "freeseats", "remainingtickets", "stock", "available", "remaining")
+_OBX_SOLD_KEYS  = ("soldseats", "soldtickets", "occupiedseats", "sold", "occupied")
+
+
+def _obx_deep_find(obj, names, depth=0):
+    """Find the first NUMERIC value whose key matches any of `names` (case-insensitive)."""
+    if depth > 6:
+        return None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.lower() in names and isinstance(v, (int, float)) and not isinstance(v, bool):
+                return int(v)
+        for v in obj.values():
+            found = _obx_deep_find(v, names, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _obx_deep_find(item, names, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _obx_session_items(body):
+    """Normalise a sessions payload into a list of session dicts."""
+    if isinstance(body, list):
+        return [s for s in body if isinstance(s, dict)]
+    if isinstance(body, dict):
+        for key in ("items", "data", "content", "sessions", "results", "elements"):
+            val = body.get(key)
+            if isinstance(val, list):
+                return [s for s in val if isinstance(s, dict)]
+        return [body]
+    return []
+
+
 def _parse_oneboxtds_responses(api_data, url):
     """Parse intercepted oneboxtds API responses and return sessions list."""
-    capacity = 0
-    sold     = 0
-    date_iso = ""
-    label    = ""
     event_id_m = re.search(r"/events/(\d+)", url)
     event_id   = event_id_m.group(1) if event_id_m else "main"
 
-    for path, body in api_data.items():
-        if not isinstance(body, dict):
-            print(f"  [{path[:50]}] type={type(body).__name__}, sample={str(body)[:200]}")
+    for path in api_data:
+        print(f"  [{path[:70]}]")
+
+    # The sessions endpoint carries per-session availability:
+    #   /channels-api/v1/catalog/events/{id}/sessions?limit=..&offset=..&type=SESSION
+    sessions_body = next(
+        (b for p, b in api_data.items() if "/sessions" in p and "catalog" in p), None
+    )
+    if sessions_body is None:
+        sessions_body = next((b for p, b in api_data.items() if "/sessions" in p), None)
+
+    results = []
+    for s in _obx_session_items(sessions_body):
+        cap   = _obx_deep_find(s, _OBX_CAP_KEYS)
+        avail = _obx_deep_find(s, _OBX_AVAIL_KEYS)
+        sold  = _obx_deep_find(s, _OBX_SOLD_KEYS)
+
+        if cap is None and avail is not None and sold is not None:
+            cap = avail + sold
+        if cap is None:
             continue
+        if sold is None:
+            sold = max(0, cap - (avail or 0))
 
-        print(f"  [{path[:50]}] keys: {list(body.keys())[:10]}")
+        raw_date = ""
+        for key in ("startDate", "date", "startDateTime", "sessionDate", "eventDate", "start"):
+            val = s.get(key)
+            if isinstance(val, str) and re.match(r"\d{4}-\d{2}-\d{2}", val):
+                raw_date = val
+                break
+        date_iso = raw_date[:10]
+        time_m   = re.search(r"T(\d{2}:\d{2})", raw_date)
+        label    = f"{date_iso}T{time_m.group(1)}" if (date_iso and time_m) else (date_iso or event_id)
 
-        cap   = (body.get("totalCapacity") or body.get("capacity") or body.get("Capacity")
-                 or body.get("totalSeats") or body.get("TotalSeats")
-                 or body.get("aforo") or 0)
-        avail = (body.get("availableSeats") or body.get("available") or body.get("Available")
-                 or body.get("remainingSeats") or body.get("seatsAvailable") or 0)
-        s_date = (body.get("date") or body.get("startDate") or body.get("startDateTime")
-                  or body.get("eventDate") or "")
+        sid = s.get("id") or s.get("sessionId") or event_id
+        print(f"  Session {label}: total={cap}, avail={avail}, sold={sold}")
+        results.append({
+            "session_id": str(sid),
+            "label":      label,
+            "date":       date_iso,
+            "capacity":   int(cap),
+            "sold":       int(sold),
+            "reserved":   0,
+        })
 
-        if s_date:
-            dm = re.match(r"(\d{4}-\d{2}-\d{2})", str(s_date))
-            if dm:
-                date_iso = dm.group(1)
-                time_m   = re.search(r"T(\d{2}:\d{2})", str(s_date))
-                label    = f"{date_iso}T{time_m.group(1)}" if time_m else date_iso
+    if results:
+        return results
 
-        if cap:
-            capacity = int(cap)
-            sold     = max(0, int(cap) - int(avail))
-            print(f"  Capacity from {path[:50]}: total={cap}, avail={avail}, sold={sold}")
-            break
-
-    if not capacity and api_data:
-        print("  No capacity fields found — logging full response bodies:")
-        for path, body in list(api_data.items())[:3]:
-            print(f"    [{path[:50]}] {str(body)[:500]}")
-
-    if not capacity:
-        # Don't save fake 0/0 sessions when Cloudflare blocked us or fields unknown
-        print("  No capacity — skipping (not saving 0/0)")
-        return []
-
-    return [{
-        "session_id": event_id,
-        "label":      label or event_id,
-        "date":       date_iso,
-        "capacity":   capacity,
-        "sold":       sold,
-        "reserved":   0,
-    }]
+    # Nothing parsed — dump the interesting bodies IN FULL so the schema can be mapped.
+    print("  No capacity fields found — dumping catalog/session responses:")
+    for path, body in api_data.items():
+        if "catalog" in path or "/sessions" in path:
+            print(f"    [{path[:70]}] {json.dumps(body, ensure_ascii=False)[:4000]}")
+    print("  No capacity — skipping (not saving 0/0)")
+    return []
 
 
 def _camoufox_worker(url):

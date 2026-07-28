@@ -8,11 +8,17 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUNBUFFERED: "1" # stream scraper logs live instead of one flush at the end
+
+# Never let a throttled/slow run pile up on top of the next one — wasted Actions minutes
+concurrency:
+  group: scrape
+  cancel-in-progress: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
 
     steps:
       - uses: actions/checkout@v4
@@ -37,16 +43,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      # Browser binaries are ~200 MB and never change between runs — caching them
+      # saves roughly a minute of Actions time per run.
+      - name: Cache browsers
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/camoufox
+          key: browsers-pw1.49.1-camoufox-${{ runner.os }}
 
       - name: Install dependencies
         run: |
-          # playwright pinned to 1.49.1: newer versions speak a juggler protocol
-          # camoufox's bundled Firefox doesn't understand (Browser.setDefaultViewport isMobile error)
-          pip install "playwright==1.49.1" requests "camoufox[geoip]"
-          playwright install chromium --with-deps
-          python -m camoufox fetch
+          pip install -r scripts/requirements.txt
           # xvfb: camoufox headless="virtual" needs a virtual display to pass Cloudflare
           sudo apt-get install -y xvfb
+
+      - name: Install browsers (cache miss only)
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        run: |
+          playwright install chromium --with-deps
+          python -m camoufox fetch
+
+      - name: Install browser system libs (cache hit)
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
 
       - name: Run scraper
         env:
