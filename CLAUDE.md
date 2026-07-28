@@ -58,7 +58,7 @@ The dashboard "🔄 Actualizar todo" button also calls `/api/cron/scrape` on dem
 | `bacantix` | GitHub Actions Playwright | MCIAjax.aspx XML — `<E Estados="..."/>` string, pos N = state of seat id N; `'1'`=libre, `'3'`=vendida (NOT O attr, which is orientation) |
 | `reservaentradas` | GitHub Actions HTTP | `sesionv2` API on venue subdomain: `https://{slug}.reservaentradas.com/{slug}/sesionv2?recinto=X&sesion=EVENT_ID&key=apirswebphp` — returns `Sesion.Aforo` and `Sesion.Disponibles` |
 | `auditoriocartuja` | GitHub Actions HTTP | Janto API: `apiw5.janto.es/v5/sessions/{code}/full/01` — requires Referer header; `sessions` is a dict not a list. Venue page may WAF-block `requests` from GH runners → Playwright fallback fetches the HTML |
-| `ctickets` | GitHub Actions Playwright | Server-rendered HTML; click each available zone → count `.libre` / `.ocupada` CSS classes. Sold-out zones have `class="zonacompleta"` |
+| `ctickets` | GitHub Actions HTTP | Each zone has its own GET seat-map URL: `/comprar_entradas/{event}/{zone}` — works for sold-out zones too (they carry `class="zonacompleta"` on the event page). Count `libre` / `ocupada` classes. No browser needed |
 | `patronbase` | GitHub Actions HTTP | Server-rendered seat maps: `pb_pyos_free` / `pb_pyos_held` classes per seat type; held includes admin blocks → sold_baseline applies |
 | `oneboxtds` | GitHub Actions camoufox | Angular SPA behind Cloudflare — needs camoufox (Firefox). playwright MUST stay pinned to 1.49.1 or camoufox's juggler protocol breaks (`setDefaultViewport isMobile` error) |
 | `ukalarimenorca` | GitHub Actions Playwright | baila.pro API. Gateway rejects short `Mozilla/5.0` UA — use full Chrome UA. No public numeric availability (only `HasAvailability`) → scraper returns [] instead of fake 0/0 |
@@ -81,6 +81,20 @@ Called before each ingest batch — removes sessions whose `session_id` is not i
 
 ### Sort order (getEvents)
 Events sorted by nearest upcoming `session_date` via `MIN(s.session_date) WHERE >= today`. Falls back to `show_date` then `created_at`. NULLS LAST. All scrapers must output `date` as `"YYYY-MM-DD"` ISO string.
+
+### GitHub Actions minutes budget (private repo!)
+
+The repo is **private**, so every Actions minute counts against the Free plan's
+2000 min/month. In July 2026 the job cost ~4.9 min/run (~2100 min/month) and the
+account got blocked — every run then failed in ~4s with **0 steps and no logs**.
+
+Diagnosing that state: a run with `steps=0` and a 404 on the logs endpoint is
+*never* a code bug. Read the check-run annotation:
+`GET /repos/{owner}/{repo}/check-runs/{job_id}/annotations`
+
+Keep the job cheap (currently ~1.7 min/run): ctickets and patronbase are plain
+HTTP, browsers are cached between runs, and only bacantix / ukalarimenorca /
+oneboxtds (camoufox) still need a real browser.
 
 ### Environment variables
 
