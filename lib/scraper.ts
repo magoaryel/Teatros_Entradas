@@ -7,7 +7,7 @@ export interface ScrapedSession {
   reserved: number;
 }
 
-async function scrapeGruposmedia(url: string): Promise<ScrapedSession[]> {
+async function fetchGruposmediaHtml(url: string): Promise<string> {
   const res = await fetch(url, {
     headers: {
       "User-Agent":
@@ -16,12 +16,28 @@ async function scrapeGruposmedia(url: string): Promise<ScrapedSession[]> {
     },
     next: { revalidate: 0 },
   });
-
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  return res.text();
+}
 
-  const html = await res.text();
+async function scrapeGruposmedia(url: string): Promise<ScrapedSession[]> {
+  const html = await fetchGruposmediaHtml(url);
   const match = html.match(/arraySesiones\s*=\s*(\[[\s\S]*?\]);/);
-  if (!match) throw new Error("arraySesiones not found in page");
+  if (!match) {
+    // Cartelera page (gruposmedia.com/cartelera/...) has no arraySesiones, but links
+    // to the current comprarEvento?idEvento=N. Following it survives gruposmedia
+    // re-creating the event under a new ID (20813 → 21949 in Sep 2026 left us frozen).
+    const ids = [...new Set([...html.matchAll(/comprarEvento\?idEvento=(\d+)/g)].map(m => m[1]))];
+    if (ids.length === 0 || url.includes("comprarEvento")) {
+      throw new Error("arraySesiones not found in page");
+    }
+    const results = await Promise.allSettled(ids.map(id =>
+      scrapeGruposmedia(`https://entradas.gruposmedia.com/entradas/comprarEvento?idEvento=${id}`)
+    ));
+    const ok = results.filter(r => r.status === "fulfilled").flatMap(r => r.value);
+    if (ok.length === 0) throw new Error(`no sessions in linked events ${ids.join(",")}`);
+    return ok;
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sessions: any[] = JSON.parse(match[1]);

@@ -53,7 +53,7 @@ The dashboard "🔄 Actualizar todo" button also calls `/api/cron/scrape` on dem
 
 | Platform | Method | Notes |
 |---|---|---|
-| `gruposmedia` | Vercel fetch | `arraySesiones` in HTML, includes sold counts |
+| `gruposmedia` | Vercel fetch | `arraySesiones` in the comprarEvento HTML, includes sold counts. A cartelera URL has no `arraySesiones` → scraper follows its `comprarEvento?idEvento=N` links |
 | `todaslasentradas` | GitHub Actions Playwright | CSS classes `mapaLibre` / `mapaOcupada` |
 | `bacantix` | GitHub Actions Playwright | MCIAjax.aspx XML — `<E Estados="..."/>` string, pos N = state of seat id N; `'1'`=libre, `'3'`=vendida (NOT O attr, which is orientation) |
 | `reservaentradas` | GitHub Actions HTTP | `sesionv2` API on venue subdomain: `https://{slug}.reservaentradas.com/{slug}/sesionv2?recinto=X&sesion=EVENT_ID&key=apirswebphp` — returns `Sesion.Aforo` and `Sesion.Disponibles` |
@@ -124,7 +124,7 @@ snapshots (id, session_id, sold, reserved, available, captured_at)
 | Ciudad | Venue | Fecha | Plataforma |
 |---|---|---|---|
 | Málaga | Ópera Benalmádena | 2 Ago 2026 | oneboxtds (event 51644, aforo 888) |
-| Madrid | Teatro Fígaro | Sep 2026 – Ene 2027 (varias) | gruposmedia (idEvento=20813, all sessions in one event) |
+| Madrid | Teatro Fígaro | Oct 2026 – Ene 2027 (varias) | gruposmedia — event 35 uses the cartelera URL `gruposmedia.com/cartelera/hipnosis-de-comedia-aryel-altamar/`; the scraper follows its `comprarEvento?idEvento=N` links (was 20813, re-created as 21949 in Sep 2026 — 20813 is now empty, event 27 paused) |
 | Salamanca | Palacio de Congresos | 18 Oct 2026 | ctickets |
 | Sevilla | Auditorio Cartuja | 29 Oct 2026 | auditoriocartuja (code A291026HIPNOSTIS) |
 | Pamplona | Auditorio Barañain | 21 Nov 2026 | patronbase |
